@@ -1,0 +1,43 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="Entry.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="decryption.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="hook.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="memory.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="offsets.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Canvas.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="unrealengine.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="valorant.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Alignments.h">
+      <Filter>Decryption</Filter>
+    </ClInclude>
+    <ClInclude Include="Decryptor.h">
+      <Filter>Decryption</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Headers">
+      <UniqueIdentifier>{0ff10ebb-01d8-4b4e-9e0a-b32145221c23}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Decryption">
+      <UniqueIdentifier>{a71d89b5-403c-4366-a46c-c9163a4ba2ae}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

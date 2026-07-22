@@ -1,0 +1,20 @@
+# Visual Studio / C++ / Build Outputs
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.tmp
+*.user
+*.ipch
+
+# Visual Studio temporary files / directories
+.vs/
+Debug/
+Release/
+x64/
+x86/
+build/
+out/
