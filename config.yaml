@@ -7,13 +7,13 @@ tunnel:
   max_clients: 32
 
 session:
-  idle_timeout_sec: 600
+  idle_timeout_sec: 300          # 5 minutos (match VAL 5 timeout)
 
 heartbeat:
-  riot_timeout_ms: 5000
-  waning_threshold_sec: 420
-  interval_ms: 30000
-  jitter_max_ms: 2500
+  riot_timeout_ms: 3000          # 3 segundos (más rápido)
+  waning_threshold_sec: 240      # 4 minutos (antes de VAL 5)
+  interval_ms: 15000             # 15 segundos (más frecuente)
+  jitter_max_ms: 1000            # 1 segundo jitter
 
 paths:
   event_log_dir: "logs/sessions"
@@ -25,8 +25,8 @@ wine:
 gateway:
   region: "la"
   vanguard_ua: "vanguard/1.18.3-74+20260623.212037"
-  build_branch: "release-13.00-shipping-30-4955671"
-  build_changelist: 4955671
+  build_branch: "release-13.02-shipping-7-5092570"
+  build_changelist: 5092570
 
 stealth:
   hwid_rotation: true

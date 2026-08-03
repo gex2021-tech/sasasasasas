@@ -264,6 +264,9 @@ class SessionManager:
         if not snap:
             return False
 
+        # FAST PROVISIONING: Start immediately to avoid VAL 5 timeout
+        start_time = time.time()
+        
         container_id = self.wine.create_container()
         profile = {
             "session_id": session_id,
@@ -287,7 +290,20 @@ class SessionManager:
             return False
 
         token = self.riot.authenticate(container_id, profile)
-        scheduler = HeartbeatScheduler(session_id, container_id, self.riot)
+        
+        # Get heartbeat config from global config (or use defaults optimized for VAL 5)
+        from .config import load_config
+        from pathlib import Path
+        cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
+        hb_cfg = cfg.get("heartbeat", {})
+        
+        scheduler = HeartbeatScheduler(
+            session_id, 
+            container_id, 
+            self.riot,
+            interval_ms=int(hb_cfg.get("interval_ms", 15000)),      # 15s default (faster)
+            jitter_max_ms=int(hb_cfg.get("jitter_max_ms", 1000)),   # 1s jitter
+        )
 
         with self._lock:
             s = self._sessions.get(session_id)
@@ -306,20 +322,35 @@ class SessionManager:
         if jwt:
             self.riot.on_client_jwt(session_id, container_id, jwt, puuid)
 
+        # Send FIRST heartbeat immediately to prevent VAL 5
+        log.info("session %s sending IMMEDIATE first heartbeat to prevent VAL 5", session_id[:8])
+        scheduler.send_heartbeat(force=True)
+        
+        provision_time = time.time() - start_time
         self._log_event(
             session_id,
             "container",
             "provisioned",
-            f"cid={container_id[:8]} pid={pid} jwt_len={len(jwt)}",
+            f"cid={container_id[:8]} pid={pid} jwt_len={len(jwt)} provision_ms={int(provision_time*1000)}",
         )
         log.info(
-            "session %s container %s provisioned (pid=%d jwt_len=%d puuid=%s)",
+            "session %s container %s provisioned in %.2fs (pid=%d jwt_len=%d puuid=%s)",
             session_id[:8],
             container_id[:8],
+            provision_time,
             pid,
             len(jwt),
             puuid[:8] if puuid else "",
         )
+        
+        # Warn if provisioning took too long (risk of VAL 5)
+        if provision_time > 10.0:
+            log.warning(
+                "session %s SLOW PROVISIONING (%.2fs) - may trigger VAL 5!",
+                session_id[:8],
+                provision_time
+            )
+        
         return True
 
     def destroy_session(self, session_id: str) -> None:
@@ -352,13 +383,35 @@ class SessionManager:
         with self._lock:
             sessions = len(self._sessions)
             containers = sum(1 for s in self._sessions.values() if s.container_id)
+            
+            # VAL 5 RISK DETECTION: Check for sessions without activity
+            now = time.time()
+            at_risk = []
+            for sid, s in self._sessions.items():
+                time_since_auth = now - s.client_jwt_at if s.client_jwt_at else 999
+                time_since_activity = now - s.last_activity
+                
+                # Risk: No JWT refresh in 4 minutes OR no activity in 3 minutes
+                if time_since_auth > 240 or time_since_activity > 180:
+                    at_risk.append((sid, time_since_auth, time_since_activity))
+        
         if sessions == 0:
             return
+            
         log.info(
             "status: active_sessions=%d containers=%d",
             sessions,
             containers,
         )
+        
+        # Warn about VAL 5 risk
+        for sid, jwt_age, activity_age in at_risk:
+            log.warning(
+                "session %s VAL 5 RISK: jwt_age=%.1fs activity_age=%.1fs",
+                sid[:8],
+                jwt_age,
+                activity_age
+            )
 
     def _expire_idle(self) -> None:
         now = time.time()

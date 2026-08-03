@@ -26,6 +26,7 @@ class MsgType(IntEnum):
     PIPE_AUTH_OK = 13
     SESSION_AUTH = 14
     SESSION_AUTH_OK = 15
+    TASK_RESULT = 16  # NEW - response to heartbeat tasks
 
 
 def pack(msg_type: int, payload: bytes = b"") -> bytes:
@@ -267,3 +268,9 @@ def pack_session_auth_ok(session_id: str, gateway_envelope: bytes = b"") -> byte
     body = struct.pack("!I", len(sid)) + sid
     body += struct.pack("!I", len(gateway_envelope)) + gateway_envelope
     return pack(MsgType.SESSION_AUTH_OK, body)
+
+
+def pack_task_result(task_result_data: bytes) -> bytes:
+    """Pack TaskResultRequest message (type 16)"""
+    return pack(MsgType.TASK_RESULT, task_result_data)
+

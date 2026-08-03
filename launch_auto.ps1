@@ -111,8 +111,27 @@ ipconfig /flushdns | Out-Null
 Write-Host "  [+] DNS Cache Flushed." -ForegroundColor Green
 Write-Host ""
 
-# ── STEP 4: LAUNCH RIOT CLIENT / VALORANT FIRST ───────────────────────────────
-Write-Host "[4/5] Launching Riot Client / Valorant..." -ForegroundColor Yellow
+# ── STEP 4: START VCLIENT EMULATOR ────────────────────────────────────────────
+Write-Host "[4/5] Starting vClient Pipe Interceptor..." -ForegroundColor Yellow
+$vClientExe = Join-Path $ROOT_DIR "vClient.exe"
+if (-not (Test-Path $vClientExe)) {
+    $vClientExe = Join-Path $ROOT_DIR "vgc_client.exe"
+}
+
+if (-not (Test-Path $vClientExe)) {
+    Write-Host "  [-] Error: vClient.exe not found in $ROOT_DIR" -ForegroundColor Red
+    Read-Host "Press Enter to exit..."
+    exit
+}
+
+# Start vClient in background or new window
+$vClientProc = Start-Process -FilePath $vClientExe -ArgumentList $SERVER_IP -WorkingDirectory $ROOT_DIR -PassThru -WindowStyle Minimized
+Write-Host "  [+] vClient started (PID: $($vClientProc.Id)) pointing to $SERVER_IP" -ForegroundColor Green
+Start-Sleep -Seconds 2
+Write-Host ""
+
+# ── STEP 5: LAUNCH RIOT CLIENT / VALORANT ──────────────────────────────────────
+Write-Host "[5/5] Launching Riot Client / Valorant..." -ForegroundColor Yellow
 
 $riotPaths = @(
     "C:\Riot Games\Riot Client\RiotClientServices.exe",
@@ -122,6 +141,7 @@ $riotPaths = @(
     "${env:ProgramFiles(x86)}\Riot Games\Riot Client\RiotClientServices.exe"
 )
 
+# Also check registry
 try {
     $regPath = (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Riot Games, Inc\Riot Client" -ErrorAction SilentlyContinue).Path
     if ($regPath -and (Test-Path $regPath)) { $riotPaths = @($regPath) + $riotPaths }
@@ -143,25 +163,6 @@ if ($foundRiot) {
     Write-Host "  [!] Could not locate RiotClientServices.exe automatically." -ForegroundColor DarkYellow
     Write-Host "      Please launch Valorant manually now from your shortcut." -ForegroundColor Cyan
 }
-Write-Host ""
-
-# ── STEP 5: START VCLIENT EMULATOR ────────────────────────────────────────────
-Write-Host "[5/5] Starting vClient Pipe Interceptor..." -ForegroundColor Yellow
-$vClientExe = Join-Path $ROOT_DIR "vClient.exe"
-if (-not (Test-Path $vClientExe)) {
-    $vClientExe = Join-Path $ROOT_DIR "vgc_client.exe"
-}
-
-if (-not (Test-Path $vClientExe)) {
-    Write-Host "  [-] Error: vClient.exe not found in $ROOT_DIR" -ForegroundColor Red
-    Read-Host "Press Enter to exit..."
-    exit
-}
-
-$vClientProc = Start-Process -FilePath $vClientExe -ArgumentList $SERVER_IP -WorkingDirectory $ROOT_DIR -PassThru -WindowStyle Minimized
-Write-Host "  [+] vClient started (PID: $($vClientProc.Id)) pointing to $SERVER_IP" -ForegroundColor Green
-Start-Sleep -Seconds 2
-Write-Host ""
 
 Write-Host ""
 Write-Host "=================================================================" -ForegroundColor Cyan

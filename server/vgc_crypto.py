@@ -155,22 +155,18 @@ class CryptoSession:
         if not self.mounted:
             return b""
 
-        if ioctl_code in (IOCTL_HEARTBEAT_STUB,):
-            return self.heartbeat_payload()
-
-        if ioctl_code == IOCTL_ACCESS:
-            if data:
-                return self.heartbeat_payload()
-            return b"CLEAN\x00"
-
-        if (ioctl_code >> 16) == 0x22:
-            if data:
-                return self.heartbeat_payload()
-            return b"CLEAN\x00"
-
-        if data:
-            return data
-        return self.heartbeat_payload()
+        # Import driver here to avoid circular dependency
+        from .vgc_driver import handle_driver_ioctl
+        
+        session_id = str(self.profile.get("session_id", ""))
+        
+        # Use enhanced driver for realistic responses
+        return handle_driver_ioctl(
+            session_id=session_id,
+            ioctl_code=ioctl_code,
+            input_data=data,
+            aes_key=self.aes_key
+        )
 
 
 def profile_to_mount_json(profile: Dict[str, Any]) -> bytes:

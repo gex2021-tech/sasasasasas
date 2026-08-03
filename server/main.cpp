@@ -139,10 +139,18 @@ static void WriteSessionAuthRegistry() {
 }
 
 static void EmulateVgcService() {
-    // Ensure event and registry exist without forcefully stopping real driver until game starts
+    // Kill the real VGC service first
+    system("sc stop vgc >nul 2>&1");
+    system("sc config vgc start= disabled >nul 2>&1");
+    Sleep(500);
+    
+    // Create the event Valorant checks
     CreateVgcEvent();
+    
+    // Write registry entries
     WriteSessionAuthRegistry();
-    Log("[VGC-EMU] VGC service emulation prepared");
+    
+    Log("[VGC-EMU] VGC service emulation active");
 }
 
 // ── Wire helpers ──────────────────────────────────────────────────────────────
@@ -1410,14 +1418,21 @@ int main(int argc, char* argv[]) {
     Log("Mode: auth401 (f2=os_info f4=entitlement_token f5=RSA_PEM f13=external_sid)");
     Log("Region: la1");
 
-    // ── Step 1: Prepare environment ──
-    std::cout << "\x1b[93m[1/5] Preparing environment...\x1b[0m\n";
-    Log("[STEP 1/5] Preparing environment...");
+    // ── Step 1: Kill stale processes ──
+    std::cout << "\x1b[93m[1/5] Killing stale processes...\x1b[0m\n";
+    Log("[STEP 1/5] Killing stale processes...");
+    system("taskkill /F /IM vgc.exe >nul 2>&1");
+    system("taskkill /F /IM vgtray.exe >nul 2>&1");
+    Sleep(300);
+
+    // ── Step 2: Emulate VGC service (bypassing VGC check) ──
+    std::cout << "\x1b[93m[2/5] Bypassing VGC check...\x1b[0m\n";
+    Log("[STEP 2/5] Bypassing VGC check...");
     EmulateVgcService();
 
-    // ── Step 2: Start Pipe Servers ──
-    std::cout << "\x1b[93m[2/5] Establishing pipe servers...\x1b[0m\n";
-    Log("[STEP 2/5] Starting Pipe Servers with permissive ACL...");
+    // ── Step 3: Start Pipe Servers ──
+    std::cout << "\x1b[93m[3/5] Establishing heartbeats...\x1b[0m\n";
+    Log("[STEP 3/5] Starting Pipe Servers with permissive ACL...");
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\933823D3-C77B-4BAE-89D7-A92B567236BC"); }).detach();
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\933823D3-C77B-4BAE-89D2-A92B567236BC"); }).detach();
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\vgservice"); }).detach();
@@ -1425,9 +1440,9 @@ int main(int argc, char* argv[]) {
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\vgk"); }).detach();
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\OffsetPipe"); }).detach();
 
-    // ── Step 3: Wait for Valorant process ──
-    std::cout << "\x1b[93m[3/5] Waiting for VALORANT launch...\x1b[0m\n";
-    Log("[STEP 3/5] Waiting for VALORANT (VALORANT-Win64-Shipping.exe)...");
+    // ── Step 4: Wait for Valorant process ──
+    std::cout << "\x1b[93m[4/5] Waiting for VALORANT...\x1b[0m\n";
+    Log("[STEP 4/5] Waiting for VALORANT (VALORANT-Win64-Shipping.exe)...");
     while (!g_shutdown.load()) {
         g_valorant_pid = GetValorantPID();
         if (g_valorant_pid) {
@@ -1437,12 +1452,6 @@ int main(int argc, char* argv[]) {
         }
         Sleep(200);
     }
-
-    // ── Step 4: Intercept VGC pipe once game starts ──
-    std::cout << "\x1b[93m[4/5] Intercepting VGC pipe...\x1b[0m\n";
-    Log("[STEP 4/5] Intercepting VGC pipe...");
-    // Keep service enabled to avoid VAN -81, only stop current instance if needed for pipe bind
-    system("sc stop vgc >nul 2>&1");
 
     // ── Step 5: Auth request ──
     std::cout << "\x1b[93m[5/5] Sending auth request...\x1b[0m\n";

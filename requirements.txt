@@ -1,0 +1,11 @@
+# VGC Emulator Dependencies
+
+# Core
+pyyaml>=6.0
+
+# Cryptography (required for HKDF+AES-GCM heartbeat task decryption)
+cryptography>=41.0.0
+
+# UI Loader
+psutil>=5.9.0
+
