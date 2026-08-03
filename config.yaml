@@ -1,7 +1,7 @@
 tunnel:
   host: "0.0.0.0"
   port: 51820
-  auth_key: "FU_CLV6_IQ=="
+  auth_key: "feqxYc-ilusao"
   tls_cert: "certs/server.pem"
   tls_key: "certs/server.key"
   max_clients: 32
@@ -12,6 +12,8 @@ session:
 heartbeat:
   riot_timeout_ms: 5000
   waning_threshold_sec: 420
+  interval_ms: 30000
+  jitter_max_ms: 2500
 
 paths:
   event_log_dir: "logs/sessions"
@@ -19,3 +21,14 @@ paths:
 
 wine:
   enabled: false
+
+gateway:
+  region: "la"
+  vanguard_ua: "vanguard/1.18.3-74+20260623.212037"
+  build_branch: "release-13.00-shipping-30-4955671"
+  build_changelist: 4955671
+
+stealth:
+  hwid_rotation: true
+  token_jitter_ms: 1500
+  fallback_noise: true

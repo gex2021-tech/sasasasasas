@@ -2,77 +2,61 @@
 
 Emulador de servidores de Valorant (VGC) para testing de cheats y desarrollo.
 
-## Estructura
+## Arquitectura Actual
+
+El proyecto ha sido refactorizado a una arquitectura Python/C++:
+
+- **Main Server (Python)**: El servidor principal se encuentra en el paquete `server/`. Maneja la lógica, sesiones y el protocolo binario sobre TLS.
+- **vClient (C++)**: El cliente/tunnel (`server/main.cpp`) se ejecuta en el PC de juegos (Gaming PC).
+
+## Estructura del Proyecto
 
 ```
 amulator/
-├── src/
-│   ├── main.cpp              # Punto de entrada
-│   ├── core/
-│   │   └── session_manager.h  # Gestión de sesiones
-│   ├── network/
-│   │   └── vgc_socket.h       # Socket server
-│   └── crypto/
-│       └── crypto_manager.h   # Criptografía RSA
-├── certs/
-│   ├── emulator_private.key   # Clave privada RSA
-│   ├── emulator_public.key    # Clave pública RSA
-│   └── emulator_cert.pem      # Certificado TLS
-├── config/
-│   └── emulator_config.json   # Configuración
-└── build/
-    └── build.bat              # Script de compilación
+├── server/
+│   ├── protocol.py           # Protocolo binario tunnel <-> servidor
+│   ├── server.py             # Lógica del servidor principal en Python
+│   └── main.cpp              # vClient para el Gaming PC
+├── legacy/
+│   └── server_prototype.cpp  # Prototipo original en C++
+├── certs/                    # Claves y certificados TLS
+├── config.yaml               # Configuración del servidor
+├── test_client.py            # Herramienta de testing del protocolo
+└── setup_gaming_pc.ps1       # Script de configuración para el Gaming PC
 ```
+*(Nota: El directorio `src/` vacío y los archivos del prototipo antiguo se han movido a `legacy/` o eliminado).*
 
 ## Requisitos
 
 - Windows 10/11
-- Visual Studio 2022 con carga de trabajo C++
-- Python 3.9+ (opcional, para scripts)
+- Visual Studio 2022 con carga de trabajo C++ (para el vClient)
+- Python 3.9+ (para el Main Server)
 
-## Instalación
+## 2-PC Setup Instructions
 
-1. **Generar certificados** (si no los tienes):
+Para un entorno de pruebas seguro y realista, se requiere una configuración de 2 PCs:
+
+### 1. Server PC (Python)
+1. Instala los requerimientos para Python.
+2. Asegúrate de tener los certificados TLS en la carpeta `certs/`.
+3. Configura el servidor editando `config.yaml` o utilizando los valores por defecto.
+4. Inicia el servidor de emulación:
+   ```cmd
+   python server/server.py
+   ```
+
+### 2. Gaming PC (vClient)
+1. Ejecuta el script de configuración proporcionado para redirigir el tráfico VGC al Server PC. Asegúrate de ejecutarlo como Administrador:
    ```powershell
-   openssl genrsa -out emulator_private.key 2048
-   openssl req -new -x509 -key emulator_private.key -out emulator_cert.pem -days 3650
-   openssl x509 -pubkey -noout -in emulator_cert.pem > emulator_public.key
+   .\setup_gaming_pc.ps1
    ```
+   *El script añadirá entradas a tu archivo `hosts` y creará automáticamente un script `restore_hosts.ps1` para revertir los cambios cuando termines.*
+2. Compila el cliente/tunnel (vClient) ubicado en `server/main.cpp`.
+3. Ejecuta el vClient compilado en el Gaming PC.
 
-2. **Compilar**:
-   ```cmd
-   cd build
-   build.bat
-   ```
+## Testing
 
-3. **Ejecutar**:
-   ```cmd
-   vgc_emulator.exe
-   ```
-
-## Configuración
-
-Editar `config/emulator_config.json`:
-- `port`: Puerto del servidor (default: 51820)
-- `auth_key`: Clave de autenticación
-- `session.timeout`: Timeout de sesiones inactivas
-
-## Uso con Cheats
-
-1. Iniciar el emulador en PC1 (servidor)
-2. Configurar DNS/hosts en PC2 para redirigir tráfico VGC
-3. Inyectar cheat que use la clave pública del emulador
-4. Los tokens firmados por el emulador serán válidos
-
-## Próximos Pasos
-
-- Implementar parsing de paquetes VGC reales
-- Añadir offsets específicos de Valorant
-- Mocking de respuestas de servidores Riot
-- Packet sniffer para debugging
-
-## Notas
-
-- Las claves RSA incluidas son de ejemplo, generar nuevas para producción
-- Requiere dos PCs para testing completo (servidor + cliente)
-- Error VAN 102 se fixea rotando HWID y limpiando sesiones
+Puedes probar la comunicación con el servidor desde cualquier máquina utilizando el script de prueba provisto:
+```cmd
+python test_client.py --host <SERVER_IP> --port 51820
+```

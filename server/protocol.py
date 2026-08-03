@@ -147,6 +147,19 @@ class SessionAuthData:
     hwid_fingerprint: bytes = b""
     riot_account: str = ""
     hostname: str = ""
+    rsa_spki_pem: bytes = b""
+    build_branch: str = ""
+    build_changelist: int = 0
+    build_major: int = 0
+    build_minor: int = 0
+    build_patch: int = 0
+    build_flags: int = 0
+    external_sid: str = ""
+    cpu_brand: str = ""
+    cpu_model: str = ""
+    gpu_brand: str = ""
+    gpu_model: str = ""
+    cpu_logical_count: int = 0
 
 
 def _parse_len_prefixed_str(payload: bytes, off: int) -> Tuple[str, int]:
@@ -168,6 +181,20 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
     hwid_fingerprint = b""
     riot_account = ""
     hostname = ""
+    rsa_spki_pem = b""
+    build_branch = ""
+    build_changelist = 0
+    build_major = 0
+    build_minor = 0
+    build_patch = 0
+    build_flags = 0
+    external_sid = ""
+    cpu_brand = ""
+    cpu_model = ""
+    gpu_brand = ""
+    gpu_model = ""
+    cpu_logical_count = 0
+
     if off + 8 <= len(payload):
         client_ts_ms = struct.unpack_from("!Q", payload, off)[0]
         off += 8
@@ -179,6 +206,34 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
         riot_account, off = _parse_len_prefixed_str(payload, off)
     if off < len(payload):
         hostname, off = _parse_len_prefixed_str(payload, off)
+    
+    # Extended fields
+    if off < len(payload):
+        rsa_spki_pem, off = _parse_len_prefixed(payload, off)
+    if off < len(payload):
+        build_branch, off = _parse_len_prefixed_str(payload, off)
+    if off + 4 <= len(payload):
+        build_changelist = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off + 4 <= len(payload):
+        build_major = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off + 4 <= len(payload):
+        build_minor = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off + 4 <= len(payload):
+        build_patch = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off + 4 <= len(payload):
+        build_flags = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off < len(payload):
+        external_sid, off = _parse_len_prefixed_str(payload, off)
+    if off < len(payload):
+        cpu_brand, off = _parse_len_prefixed_str(payload, off)
+    if off < len(payload):
+        cpu_model, off = _parse_len_prefixed_str(payload, off)
+    if off < len(payload):
+        gpu_brand, off = _parse_len_prefixed_str(payload, off)
+    if off < len(payload):
+        gpu_model, off = _parse_len_prefixed_str(payload, off)
+    if off + 4 <= len(payload):
+        cpu_logical_count = struct.unpack_from("!I", payload, off)[0]; off += 4
 
     return SessionAuthData(
         auth_key=auth_key,
@@ -191,9 +246,24 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
         hwid_fingerprint=hwid_fingerprint,
         riot_account=riot_account,
         hostname=hostname,
+        rsa_spki_pem=rsa_spki_pem,
+        build_branch=build_branch,
+        build_changelist=build_changelist,
+        build_major=build_major,
+        build_minor=build_minor,
+        build_patch=build_patch,
+        build_flags=build_flags,
+        external_sid=external_sid,
+        cpu_brand=cpu_brand,
+        cpu_model=cpu_model,
+        gpu_brand=gpu_brand,
+        gpu_model=gpu_model,
+        cpu_logical_count=cpu_logical_count,
     )
 
 
-def pack_session_auth_ok(session_id: str) -> bytes:
+def pack_session_auth_ok(session_id: str, gateway_envelope: bytes = b"") -> bytes:
     sid = session_id.encode("utf-8")
-    return pack(MsgType.SESSION_AUTH_OK, struct.pack("!I", len(sid)) + sid)
+    body = struct.pack("!I", len(sid)) + sid
+    body += struct.pack("!I", len(gateway_envelope)) + gateway_envelope
+    return pack(MsgType.SESSION_AUTH_OK, body)

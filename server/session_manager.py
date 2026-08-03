@@ -33,6 +33,11 @@ class Session:
     riot_account: str = ""
     hostname: str = ""
     client_ip: str = ""
+    cpu_brand: str = ""
+    cpu_model: str = ""
+    gpu_brand: str = ""
+    gpu_model: str = ""
+    cpu_logical_count: int = 0
     jwt_push_count: int = 0
     pipe_auth_count: int = 0
     ping_count: int = 0
@@ -109,6 +114,11 @@ class SessionManager:
             riot_account=riot_account,
             hostname=auth.hostname,
             client_ip=client_ip,
+            cpu_brand=auth.cpu_brand,
+            cpu_model=auth.cpu_model,
+            gpu_brand=auth.gpu_brand,
+            gpu_model=auth.gpu_model,
+            cpu_logical_count=auth.cpu_logical_count,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -136,6 +146,16 @@ class SessionManager:
             puuid[:8] if puuid else "",
             self._hwid_hex(auth.hwid_fingerprint)[:16],
         )
+        if auth.cpu_brand or auth.gpu_brand:
+            log.info(
+                "session %s HWINFO cpu='%s %s' (%d threads) gpu='%s %s'",
+                session_id[:8],
+                auth.cpu_brand,
+                auth.cpu_model,
+                auth.cpu_logical_count,
+                auth.gpu_brand,
+                auth.gpu_model,
+            )
         if not self._provision_container(session_id):
             self.destroy_session(session_id)
             return None

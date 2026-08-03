@@ -6,8 +6,10 @@ import ssl
 import struct
 import threading
 from pathlib import Path
+import time
 from typing import Optional
 
+from .gateway_envelope import build_gateway_envelope
 from .heartbeat_scheduler import HeartbeatRelay
 from .protocol import (
     HEADER,
@@ -102,7 +104,25 @@ class TunnelServer:
                         sid = self.session_mgr.create_on_session_auth(auth, client_ip)
                         if sid:
                             session_id = sid
-                            conn.sendall(pack_session_auth_ok(sid))
+                            timestamp_ms = int(time.time() * 1000)
+                            build_info = {
+                                "branch": auth.build_branch,
+                                "changelist": auth.build_changelist,
+                                "major": auth.build_major,
+                                "minor": auth.build_minor,
+                                "patch": auth.build_patch,
+                                "flags": auth.build_flags,
+                            }
+                            env = build_gateway_envelope(
+                                session_id=sid,
+                                hwid_hex=auth.hwid_fingerprint.hex() if auth.hwid_fingerprint else "",
+                                puuid=auth.puuid,
+                                region=auth.region,
+                                build_info=build_info,
+                                rsa_spki_pem=auth.rsa_spki_pem,
+                                timestamp_ms=timestamp_ms
+                            )
+                            conn.sendall(pack_session_auth_ok(sid, env))
                         else:
                             conn.sendall(pack(MsgType.ERROR, b"session_auth_failed"))
                     elif mt == MsgType.HELLO:

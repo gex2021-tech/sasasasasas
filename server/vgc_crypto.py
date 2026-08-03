@@ -1,7 +1,14 @@
-"""In-process vgk crypto session — mount + IOCTL payload generation."""
+"""In-process vgk crypto session — mount + IOCTL payload generation.
+
+Stealth features:
+  - Per-heartbeat token noise via HMAC-SHA256 rolling key
+  - Session-bound AES key derivation using HMAC(jwt, hwid)
+  - Protobuf header preserved while payload bytes vary
+"""
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import struct
@@ -43,6 +50,65 @@ FALLBACK_TOKEN = bytes([
 IOCTL_ACCESS = 0x22C03C
 IOCTL_HEARTBEAT_STUB = 0x222000
 
+# Protobuf header occupies bytes 0..19 — never touch these.
+_NOISE_START = 20
+_NOISE_END = 280
+
+
+# ---------------------------------------------------------------------------
+#  Stealth helpers
+# ---------------------------------------------------------------------------
+
+def _derive_session_key(jwt: str, hwid_hex: str) -> bytes:
+    """HMAC-SHA256 key derivation binding JWT to hardware identity.
+
+    Stronger than plain SHA256(jwt) — ties the crypto session to a
+    specific machine fingerprint so replayed JWTs from different HWIDs
+    produce different key material.
+    """
+    if not hwid_hex:
+        return hashlib.sha256(jwt.encode("utf-8")).digest()
+    return hmac.new(
+        jwt.encode("utf-8"),
+        hwid_hex.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+
+
+def _noise_token(
+    base: bytes,
+    session_id: str,
+    sequence: int,
+    timestamp: float,
+) -> bytes:
+    """Apply per-heartbeat noise to the FALLBACK_TOKEN.
+
+    Preserves the protobuf header (bytes 0..19) intact. XORs bytes
+    20..280 with a rolling HMAC key derived from (session_id, seq, ts).
+    Each heartbeat produces a unique payload — defeats static
+    signature detection while keeping the outer protobuf envelope valid.
+    """
+    # Build a rolling key: HMAC-SHA256(session_id, seq || ts)
+    msg = struct.pack("!Qd", sequence, timestamp)
+    rolling = hmac.new(
+        session_id.encode("utf-8") if session_id else b"fallback",
+        msg,
+        hashlib.sha256,
+    ).digest()
+
+    out = bytearray(base)
+    end = min(_NOISE_END, len(out))
+    key_len = len(rolling)
+
+    for i in range(_NOISE_START, end):
+        out[i] ^= rolling[(i - _NOISE_START) % key_len]
+
+    return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+#  CryptoSession
+# ---------------------------------------------------------------------------
 
 @dataclass
 class CryptoSession:
@@ -55,8 +121,9 @@ class CryptoSession:
     def mount(self, profile: Dict[str, Any]) -> None:
         self.profile = dict(profile)
         jwt = str(profile.get("jwt", ""))
+        hwid_hex = str(profile.get("hwid_fingerprint_hex", ""))
         if jwt:
-            self.aes_key = hashlib.sha256(jwt.encode("utf-8")).digest()
+            self.aes_key = _derive_session_key(jwt, hwid_hex)
         else:
             seed = json.dumps(profile, sort_keys=True, default=str).encode("utf-8")
             self.aes_key = hashlib.sha256(seed).digest()
@@ -73,13 +140,16 @@ class CryptoSession:
         self.profile["jwt"] = jwt
         self.profile["client_puuid"] = puuid
         if jwt:
-            self.aes_key = hashlib.sha256(jwt.encode("utf-8")).digest()
+            hwid_hex = str(self.profile.get("hwid_fingerprint_hex", ""))
+            self.aes_key = _derive_session_key(jwt, hwid_hex)
 
     def heartbeat_payload(self) -> bytes:
         self.hb_count += 1
         if self.profile.get("gateway_token"):
             return bytes(self.profile["gateway_token"])
-        return FALLBACK_TOKEN
+        # Apply per-heartbeat noise instead of returning static token
+        session_id = str(self.profile.get("session_id", ""))
+        return _noise_token(FALLBACK_TOKEN, session_id, self.hb_count, time.time())
 
     def ioctl_response(self, ioctl_code: int, data: bytes) -> bytes:
         if not self.mounted:

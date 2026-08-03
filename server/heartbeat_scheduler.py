@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from collections import deque
@@ -43,7 +44,11 @@ class HeartbeatScheduler:
 
     def tick(self) -> None:
         elapsed_ms = (time.time() - self.last_sent) * 1000
-        if elapsed_ms >= self.interval_ms - self.jitter_max_ms:
+        # Per-tick random jitter — each check uses a fresh offset
+        # so heartbeat timing is unpredictable (stealth)
+        jitter = random.randint(-self.jitter_max_ms, self.jitter_max_ms)
+        threshold = self.interval_ms + jitter
+        if elapsed_ms >= threshold:
             self.send_heartbeat()
 
     def send_heartbeat(
