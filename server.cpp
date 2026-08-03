@@ -97,26 +97,40 @@ void HandleClient(SOCKET clientSocket, BCRYPT_KEY_HANDLE hPrivKey) {
     char buffer[BUFFER_SIZE];
     int bytesReceived;
 
-    std::cout << "[*] Nuevo cliente conectado desde socket: " << clientSocket << std::endl;
+    std::cout << "\n[+] [NUEVA CONEXION] Cliente conectado desde socket: " << clientSocket << std::endl;
+
+    // Abrir archivo dump.bin para guardar paquetes recibidos
+    std::ofstream dumpFile("dump.bin", std::ios::binary | std::ios::app);
 
     while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
-        // Aquí es donde ocurre la magia:
-        // 1. Parsear el paquete entrante (opcode, payload)
-        // 2. Generar respuesta falsa pero válida
-        // 3. Firmar la respuesta con tu clave RSA privada
+        std::cout << "\n[=== PAQUETE RECIBIDO ===] " << bytesReceived << " bytes" << std::endl;
         
-        std::cout << "[*] Recibidos " << bytesReceived << " bytes." << std::endl;
+        // Guardar bytes crudos en dump.bin
+        if (dumpFile.is_open()) {
+            dumpFile.write(buffer, bytesReceived);
+            dumpFile.flush();
+            std::cout << "[*] Guardados " << bytesReceived << " bytes en dump.bin" << std::endl;
+        }
+
+        // Mostrar texto/ASCII recibido
+        std::cout << "--- CONTENIDO RECIBIDO ---" << std::endl;
+        for (int i = 0; i < bytesReceived; ++i) {
+            char c = buffer[i];
+            if (c >= 32 && c <= 126) std::cout << c;
+            else if (c == '\r') std::cout << "\\r";
+            else if (c == '\n') std::cout << "\\n\n";
+            else std::cout << ".";
+        }
+        std::cout << "\n--- FIN CONTENIDO ---\n" << std::endl;
         
-        // SIMULACIÓN DE RESPUESTA (Handshake básico)
-        // En una implementación real, aquí decodificarías el protocolo de Valorant
+        // SIMULACIÓN DE RESPUESTA (Handshake básico HTTP 200)
         std::string response = "HTTP/1.1 200 OK\r\nX-Riot-Timestamp: " + std::to_string(GetTickCount64()) + "\r\n\r\n";
-        
-        // Enviar respuesta firmada (simplificado para este ejemplo)
         send(clientSocket, response.c_str(), (int)response.length(), 0);
     }
 
+    if (dumpFile.is_open()) dumpFile.close();
     closesocket(clientSocket);
-    std::cout << "[*] Cliente desconectado." << std::endl;
+    std::cout << "[-] Cliente desconectado." << std::endl;
 }
 
 int main() {
