@@ -1,20 +1,37 @@
-# Visual Studio / C++ / Build Outputs
-*.o
-*.obj
-*.exe
-*.dll
-*.lib
-*.a
-*.pdb
-*.tmp
-*.user
-*.ipch
+```
+# Directories
+temp_repo/
+vgc_emu_temp/
+vgc_emulator/
 
-# Visual Studio temporary files / directories
-.vs/
-Debug/
-Release/
-x64/
-x86/
+# Environment and cache
+.env
+.env.local
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build and distribution
+dist/
 build/
-out/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```
