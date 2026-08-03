@@ -1438,11 +1438,11 @@ int main(int argc, char* argv[]) {
         Sleep(200);
     }
 
-    // ── Step 4: Gracefully transition VGC service once game starts ──
-    std::cout << "\x1b[93m[4/5] Transitioning VGC service to emulator...\x1b[0m\n";
-    Log("[STEP 4/5] Transitioning VGC service...");
+    // ── Step 4: Intercept VGC pipe once game starts ──
+    std::cout << "\x1b[93m[4/5] Intercepting VGC pipe...\x1b[0m\n";
+    Log("[STEP 4/5] Intercepting VGC pipe...");
+    // Keep service enabled to avoid VAN -81, only stop current instance if needed for pipe bind
     system("sc stop vgc >nul 2>&1");
-    system("sc config vgc start= disabled >nul 2>&1");
 
     // ── Step 5: Auth request ──
     std::cout << "\x1b[93m[5/5] Sending auth request...\x1b[0m\n";
