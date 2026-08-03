@@ -1,0 +1,21 @@
+tunnel:
+  host: "0.0.0.0"
+  port: 51820
+  auth_key: "FU_CLV6_IQ=="
+  tls_cert: "certs/server.pem"
+  tls_key: "certs/server.key"
+  max_clients: 32
+
+session:
+  idle_timeout_sec: 600
+
+heartbeat:
+  riot_timeout_ms: 5000
+  waning_threshold_sec: 420
+
+paths:
+  event_log_dir: "logs/sessions"
+  fallback_cache: "data/fallback_cache.json"
+
+wine:
+  enabled: false

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * vClient.cpp — Vanguard pipe interceptor V5
  *
  * Flow:
@@ -74,6 +74,20 @@ static std::mutex       g_log_mtx;
 static std::ofstream    g_log_file;
 static uint32_t         g_valorant_pid = 0;
 
+static void Log(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tm_buf{};
+    localtime_s(&tm_buf, &now);
+    std::ostringstream ss;
+    ss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << " " << msg;
+    std::string line = ss.str();
+    std::cout << line << std::endl;
+    if (g_log_file.is_open()) {
+        g_log_file << line << std::endl;
+        g_log_file.flush();
+    }
+}
 
 // ── Wire helpers ──────────────────────────────────────────────────────────────
 
@@ -478,7 +492,7 @@ public:
         sc.grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT;
         if (skip_verify) sc.dwFlags = SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_MANUAL_CRED_VALIDATION;
         TimeStamp ts{};
-        if (AcquireCredentialsHandleW(nullptr, const_cast<wchar_t*>(UNISP_NAME),
+        if (AcquireCredentialsHandleW(nullptr, const_cast<SEC_WCHAR*>(UNISP_NAME_W),
             SECPKG_CRED_OUTBOUND, nullptr, &sc, nullptr, nullptr,
             &ss->cred, &ts) != SEC_E_OK) return false;
         ss->cred_ok = true;
