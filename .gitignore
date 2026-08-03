@@ -1,20 +1,46 @@
-# Visual Studio / C++ / Build Outputs
+```
+# Build artifacts
 *.o
 *.obj
-*.exe
-*.dll
-*.lib
-*.a
-*.pdb
-*.tmp
-*.user
-*.ipch
+*.out
 
-# Visual Studio temporary files / directories
-.vs/
-Debug/
-Release/
-x64/
-x86/
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+dist/
 build/
-out/
+target/
+.gradle/
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and temp files
+*.log
+*.tmp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Certs and config (if generated)
+amulator/certs/
+amulator/config/
+```
