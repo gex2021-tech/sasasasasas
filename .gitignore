@@ -1,37 +1,46 @@
 ```
-# Directories
-temp_repo/
-vgc_emu_temp/
-vgc_emulator/
+# Build artifacts
+*.o
+*.obj
+*.out
 
-# Environment and cache
-.env
-.env.local
-.env.*
+# Dependencies
+node_modules/
+venv/
+.venv/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Build and distribution
+.mypy_cache/
+.pytest_cache/
 dist/
 build/
-*.egg-info/
+target/
+.gradle/
 
-# Logs and temporary files
-*.log
-*.tmp
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
 *.swp
 *.swo
 
-# Editors and IDEs
-.vscode/
-.idea/
-*.iml
-*.ipr
-*.iws
+# Logs and temp files
+*.log
+*.tmp
 
-# OS generated files
+# System files
 .DS_Store
 Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Certs and config (if generated)
+amulator/certs/
+amulator/config/
 ```
