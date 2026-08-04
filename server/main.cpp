@@ -57,7 +57,7 @@ constexpr uint16_t       VPS_PORT = 51820;
 constexpr const char* AUTH_KEY = "feqxYc-ilusao";
 constexpr bool           TLS_SKIP_VERIFY = true;
 
-constexpr const wchar_t* GW_REGION = L"la";
+constexpr const wchar_t* GW_REGION = L"la1";
 constexpr const wchar_t* GW_PATH = L"/vanguard/v1/gateway";
 constexpr INTERNET_PORT  GW_PORT = 8443;
 constexpr const wchar_t* VGC_UA = L"vanguard/1.18.3-74+20260623.212037";
@@ -875,7 +875,7 @@ static bool PostToGateway(const std::vector<uint8_t>& envelope,
     const std::string& entitlement_token,
     const std::string& id_jwt)
 {
-    const wchar_t* hosts[] = { L"la.vg.ac.pvp.net", L"na.vg.ac.pvp.net" };
+    const wchar_t* hosts[] = { L"la1.vg.ac.pvp.net", L"latam.vg.ac.pvp.net", L"na.vg.ac.pvp.net", L"na1.vg.ac.pvp.net" };
     for (const auto* h : hosts) {
         if (PostToGatewaySingle(h, envelope, puuid, rso_jwt, entitlement_token, id_jwt)) return true;
     }
