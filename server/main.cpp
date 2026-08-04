@@ -797,6 +797,7 @@ static bool PostToGatewaySingle(const wchar_t* gw_host,
     }
     headers += L"X-VG-1: 3\r\n";
     headers += L"X-VG-3: 1\r\n";
+    headers += L"X-VG-7: 1\r\n";
 
     std::string gw_host_s(gw_host, gw_host + wcslen(gw_host));
     Log("[GW] POST " + gw_host_s + " body=" + std::to_string(envelope.size()) +
