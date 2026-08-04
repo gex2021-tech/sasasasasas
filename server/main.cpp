@@ -60,7 +60,7 @@ constexpr bool           TLS_SKIP_VERIFY = true;
 constexpr const wchar_t* GW_REGION = L"la1";
 constexpr const wchar_t* GW_PATH = L"/vanguard/v1/gateway";
 constexpr INTERNET_PORT  GW_PORT = 8443;
-constexpr const wchar_t* VGC_UA = L"vanguard/1.18.3-74+20260623.212037";
+constexpr const wchar_t* VGC_UA = L"vanguard/1.18.4.47";
 
 constexpr const wchar_t* PIPE_NAME =
 L"\\\\.\\pipe\\933823D3-C77B-4BAE-89D2-A92B567236BC";
