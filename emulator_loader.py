@@ -38,9 +38,10 @@ class EmulatorLoader:
         self.stages = [
             {"name": "Verifying server connection", "progress": 10, "done": False},
             {"name": "Killing stale processes", "progress": 20, "done": False},
-            {"name": "Launching Riot client", "progress": 30, "done": False},
-            {"name": "Bypassing VGC check", "progress": 50, "done": False},
-            {"name": "Establishing heartbeats", "progress": 70, "done": False},
+            {"name": "Launching Riot client & tunnel", "progress": 30, "done": False},
+            {"name": "Waiting for VALORANT main menu", "progress": 60, "done": False},
+            {"name": "Bypassing VGC check", "progress": 75, "done": False},
+            {"name": "Establishing heartbeats", "progress": 90, "done": False},
             {"name": "Sending auth request", "progress": 100, "done": False},
         ]
         
@@ -310,42 +311,44 @@ class EmulatorLoader:
             self.update_progress(30, 2)
             self.stages[2]["done"] = True
             
-            # Stage 3: Wait for Valorant + VGC bypass (30% -> 50%)
-            self.update_status("⏳ Waiting for VALORANT.exe...")
+            # Stage 3: Wait for Valorant main menu to fully load (30% -> 60%)
+            self.update_status("⏳ Waiting for VALORANT main menu to load...")
             self.update_progress(30, 3)
             if not self.wait_for_game():
                 self.update_status("❌ Timeout waiting for game")
                 return
-            
-            self.update_status("Bypassing VGC check...")
-            time.sleep(2)  # Simulate VGC bypass
-            self.update_progress(50, 3)
+            self.update_progress(60, 3)
             self.stages[3]["done"] = True
             
-            # Stage 4: Establish heartbeats (50% -> 70%)
+            # Stage 4: Bypass VGC check AFTER game is loaded (60% -> 75%)
+            self.update_status("Bypassing VGC check (Game loaded)...")
+            self.update_progress(60, 4)
+            time.sleep(2)  # Stop/Bypass VGC
+            self.update_progress(75, 4)
+            self.stages[4]["done"] = True
+            
+            # Stage 5: Establish heartbeats (75% -> 90%)
             self.update_status("Establishing heartbeats with server...")
-            self.update_progress(50, 4)
+            self.update_progress(75, 5)
             if not self.establish_heartbeats():
                 self.update_status("❌ Heartbeat connection failed")
                 return
             time.sleep(2)
-            self.update_progress(70, 4)
-            self.stages[4]["done"] = True
+            self.update_progress(90, 5)
+            self.stages[5]["done"] = True
             
-            # Stage 5: Send auth request (70% -> 100%)
-            self.update_status("Waiting for game loading screen...")
-            self.update_progress(70, 5)
-            time.sleep(3)  # Wait for loading screen
+            # Stage 6: Send auth request (90% -> 100%) - FINAL STEP AT LOBBY
+            self.update_status("Sending auth request (Final Step)...")
+            self.update_progress(90, 6)
+            time.sleep(1)
             
-            self.update_status("Sending auth request...")
-            self.update_progress(85, 5)
             if not self.send_auth_request():
                 self.update_status("❌ Auth request failed")
                 return
             
             time.sleep(1)
-            self.update_progress(100, 5)
-            self.stages[5]["done"] = True
+            self.update_progress(100, 6)
+            self.stages[6]["done"] = True
             
             # Success!
             self.show_ready_screen()
@@ -648,21 +651,31 @@ class EmulatorLoader:
             return False
     
     def wait_for_game(self, timeout=300):
-        """Wait for VALORANT-Win64-Shipping.exe to start"""
+        """Wait for VALORANT-Win64-Shipping.exe to start and stabilize in memory"""
         start_time = time.time()
+        found = False
         while time.time() - start_time < timeout:
-            for proc in psutil.process_iter(['name']):
+            for proc in psutil.process_iter(['name', 'status']):
                 try:
                     name = proc.info['name'].lower()
                     if name == 'valorant-win64-shipping.exe' or name == 'valorant.exe':
-                        self.game_detected = True
-                        return True
+                        # Confirm process is active
+                        found = True
+                        break
                 except:
                     pass
+            
+            if found:
+                # Wait 8 additional seconds for game window & render engine to fully load
+                self.update_status("Game detected! Waiting for main menu to load...")
+                time.sleep(8)
+                self.game_detected = True
+                return True
+
             time.sleep(1)
-            # Update progress smoothly 30% -> 40%
+            # Update progress smoothly 30% -> 60%
             elapsed = time.time() - start_time
-            progress = 30 + min(10, (elapsed / timeout) * 10)
+            progress = 30 + min(30, (elapsed / timeout) * 30)
             self.update_progress(progress, 3)
         return False
     
