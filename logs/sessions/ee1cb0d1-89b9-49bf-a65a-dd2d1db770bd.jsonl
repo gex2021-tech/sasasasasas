@@ -1,0 +1,16 @@
+{"type": "session_auth", "sequence": 0, "timestamp_server": 1785873782529, "status": "created", "latency_ms": null, "reason": null, "meta": {"client_ip": "192.168.1.94", "client_ts_ms": 1785873783256, "region": "la", "puuid": "76756428-43d0-598f-9916-fa7a44836765", "valorant_pid": 11496, "jwt_len": 625, "riot_account": "76756428-43d0-598f-9916-fa7a44836765", "hostname": "DESKTOP-L90GD1K", "gateway_machine_id": "o\ufffdK\ufffd=\ufffd\ufffd\u001bV\ufffd\ufffd_W\ufffd\u0005\u0004\ufffd\ufffdT\ufffd*\ufffd\u0014Z\ufffd\ufffd\ufffd[\ufffd\ufffd\u03eb", "hwid_fingerprint_hex": "6fec4bc83dccde1b56a7ff5f57800504aedc54bf2ae6145abf9cfa5bf7ddcfab"}}
+{"type": "jwt_update", "sequence": 0, "timestamp_server": 1785873783340, "status": "ok", "latency_ms": null, "reason": "puuid=76756428"}
+{"type": "heartbeat", "sequence": 1, "timestamp_server": 1785873783368, "status": "ok", "latency_ms": 15, "reason": null}
+{"type": "container", "sequence": 0, "timestamp_server": 1785873783379, "status": "provisioned", "latency_ms": null, "reason": "cid=ce8449e9 pid=11496 jwt_len=625 provision_ms=840"}
+{"type": "heartbeat", "sequence": 2, "timestamp_server": 1785873799823, "status": "ok", "latency_ms": 14, "reason": null}
+{"type": "heartbeat", "sequence": 3, "timestamp_server": 1785873814932, "status": "ok", "latency_ms": 9, "reason": null}
+{"type": "heartbeat", "sequence": 4, "timestamp_server": 1785873830017, "status": "ok", "latency_ms": 15, "reason": null}
+{"type": "heartbeat", "sequence": 5, "timestamp_server": 1785873845117, "status": "ok", "latency_ms": 14, "reason": null}
+{"type": "heartbeat", "sequence": 6, "timestamp_server": 1785873861223, "status": "ok", "latency_ms": 16, "reason": null}
+{"type": "heartbeat", "sequence": 7, "timestamp_server": 1785873876336, "status": "ok", "latency_ms": 21, "reason": null}
+{"type": "heartbeat", "sequence": 8, "timestamp_server": 1785873892442, "status": "ok", "latency_ms": 17, "reason": null}
+{"type": "heartbeat", "sequence": 9, "timestamp_server": 1785873908542, "status": "ok", "latency_ms": 15, "reason": null}
+{"type": "heartbeat", "sequence": 10, "timestamp_server": 1785873924646, "status": "ok", "latency_ms": 19, "reason": null}
+{"type": "heartbeat", "sequence": 11, "timestamp_server": 1785873939732, "status": "ok", "latency_ms": 24, "reason": null}
+{"type": "heartbeat", "sequence": 12, "timestamp_server": 1785873954807, "status": "ok", "latency_ms": 20, "reason": null}
+{"type": "heartbeat", "sequence": 13, "timestamp_server": 1785873969880, "status": "ok", "latency_ms": 22, "reason": null}
