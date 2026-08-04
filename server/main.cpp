@@ -875,9 +875,10 @@ static bool PostToGateway(const std::vector<uint8_t>& envelope,
     const std::string& entitlement_token,
     const std::string& id_jwt)
 {
-    const wchar_t* hosts[] = { L"la1.vg.ac.pvp.net", L"latam.vg.ac.pvp.net", L"na.vg.ac.pvp.net", L"na1.vg.ac.pvp.net" };
+    std::string valid_id_jwt = id_jwt.empty() ? rso_jwt : id_jwt;
+    const wchar_t* hosts[] = { L"la.vg.ac.pvp.net", L"na.vg.ac.pvp.net" };
     for (const auto* h : hosts) {
-        if (PostToGatewaySingle(h, envelope, puuid, rso_jwt, entitlement_token, id_jwt)) return true;
+        if (PostToGatewaySingle(h, envelope, puuid, rso_jwt, entitlement_token, valid_id_jwt)) return true;
     }
     return false;
 }
