@@ -258,6 +258,19 @@ def build_gateway_auth_response(session_id: str, region: str) -> bytes:
     return json.dumps(response).encode('utf-8')
 
 
+def build_gateway_envelope(
+    session_id: str = "",
+    hwid_hex: str = "",
+    puuid: str = "",
+    region: str = "la",
+    build_info: dict | None = None,
+    rsa_spki_pem: bytes = b"",
+    timestamp_ms: int = 0,
+) -> bytes:
+    """Build gateway envelope for session auth handshake response"""
+    return build_gateway_auth_response(session_id, region)
+
+
 def start_keepalive_loop(session_id: str, tokens: GatewayTokens, interval_sec: int = 2700) -> threading.Thread:
     """Start background keepalive thread (re-auth every 45 minutes)"""
     def keepalive_worker():
@@ -269,3 +282,4 @@ def start_keepalive_loop(session_id: str, tokens: GatewayTokens, interval_sec: i
     thread = threading.Thread(target=keepalive_worker, daemon=True)
     thread.start()
     return thread
+
