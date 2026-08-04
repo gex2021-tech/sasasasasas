@@ -534,11 +534,11 @@ static std::vector<uint8_t> BuildSessionAuth(
 
     PushLenBytes(body, rsa_spki_pem);
 
-    PushLenStr(body, "release-13.02-shipping-7-5092570");
-    PushU32BE(body, 5092570);
+    PushLenStr(body, "release-13.00-shipping-30-4955671");
+    PushU32BE(body, 4955671);
     PushU32BE(body, 13);
-    PushU32BE(body, 2);
-    PushU32BE(body, 7);
+    PushU32BE(body, 0);
+    PushU32BE(body, 30);
     PushU32BE(body, 0);
 
     PushLenStr(body, external_sid);
@@ -919,7 +919,7 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
         return;
     }
 
-    std::string region = "la    ";
+    std::string region = "la";
     std::string auth_jwt_for_vps = entitlement_token;
     auto sa_payload = BuildSessionAuth(
         auth_jwt_for_vps,
