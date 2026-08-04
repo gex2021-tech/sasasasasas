@@ -74,27 +74,12 @@ def build_f15_token(f1_token: bytes, client_version: str) -> str:
     
     Structure:
     F15 = Base64(SHA1(F1 + client_version + fixed_suffix))
-    
-    Args:
-        f1_token: Complete F1 token
-        client_version: Client version string (e.g. "1.18.4.47")
-    
-    Returns:
-        Base64-encoded F15 token
     """
-    # Fixed suffix (16 bytes) - appears constant across clients
     fixed_suffix = b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f'
-    
-    # Combine F1 + version + suffix
-    f15_data = f1_token + client_version.encode() + fixed_suffix
-    
-    # Hash with SHA1
+    clean_version = client_version.strip()
+    f15_data = f1_token + clean_version.encode('ascii') + fixed_suffix
     f15_hash = hashlib.sha1(f15_data).digest()
-    
-    # Encode to Base64
-    f15_b64 = b64encode(f15_hash).decode('ascii')
-    
-    return f15_b64
+    return b64encode(f15_hash).decode('ascii')
 
 
 def build_tokens(puuid: str, hwid: bytes, client_version: str) -> Tuple[bytes, str]:
