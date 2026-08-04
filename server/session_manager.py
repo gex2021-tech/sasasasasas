@@ -101,13 +101,9 @@ class SessionManager:
         if puuid:
             with self._lock:
                 to_destroy = [s_id for s_id, s in self._sessions.items() if s.client_puuid == puuid]
-                for old_sid in to_destroy:
-                    old_sess = self._sessions.pop(old_sid, None)
-                    if old_sess:
-                        log.info("purging old duplicate session=%s for puuid=%s", old_sid[:8], puuid[:8])
-                        self.wm.destroy(old_sess.container_id)
-                        self.crypto.unmount(old_sid)
-                        self.sched.stop(old_sid)
+            for old_sid in to_destroy:
+                log.info("purging old duplicate session=%s for puuid=%s", old_sid[:8], puuid[:8])
+                self.destroy_session(old_sid)
 
         session_id = str(uuid.uuid4())
         session = Session(
