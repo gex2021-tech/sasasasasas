@@ -298,9 +298,10 @@ class EmulatorLoader:
             self.update_progress(10, 1)
             self.kill_stale_processes()
             try:
-                self.uninstall_vanguard_service()  # New: Stop/disable VGC like paid emulator does
+                self.uninstall_vanguard_service()  # Stop/disable real VGC
+                self.create_emulator_service()     # Create fake vgc pointing to emulator
             except Exception as e:
-                print(f"[VGC-EMU] Non-fatal error in uninstall_vanguard_service: {e}")
+                print(f"[VGC-EMU] Non-fatal error in service setup: {e}")
             time.sleep(0.5)
             self.update_progress(20, 1)
             self.stages[1]["done"] = True
@@ -474,6 +475,53 @@ class EmulatorLoader:
         # CRITICAL: Always mark as done even if VGC uninstall fails
         # This prevents the loader from getting stuck here
         return success
+    
+    def create_emulator_service(self):
+        """Create and start a fake vgc service that points to the emulator"""
+        self.update_stage_status(1, "⚙️ Creating emulator vgc service...")
+        try:
+            # Get the path to the emulator executable
+            emulator_path = os.path.join(os.path.dirname(__file__), "program.exe")
+            emulator_path_abs = os.path.abspath(emulator_path)
+            
+            print(f"[VGC-EMU] Creating fake vgc service pointing to: {emulator_path_abs}")
+            
+            # Delete existing service if it exists (ignore errors)
+            subprocess.run('sc delete vgc', shell=True, capture_output=True, timeout=3)
+            time.sleep(1)
+            
+            # Create new service pointing to emulator
+            cmd = f'sc create vgc binPath= "{emulator_path_abs}" start= auto'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            print(f"[VGC-EMU] sc create vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
+            
+            if result.returncode != 0 and "ERROR 1073" not in result.stdout:
+                print(f"[VGC-EMU] Warning: Service creation returned {result.returncode}")
+            
+            time.sleep(1)
+            
+            # Start the service
+            print("[VGC-EMU] Starting emulator vgc service...")
+            result = subprocess.run('sc start vgc', shell=True, capture_output=True, text=True, timeout=10)
+            print(f"[VGC-EMU] sc start vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
+            
+            # Verify service is running
+            result = subprocess.run('sc query vgc', shell=True, capture_output=True, text=True, timeout=3)
+            print(f"[VGC-EMU] sc query vgc: {result.stdout[:300] if result.stdout else 'no output'}")
+            
+            if "RUNNING" in result.stdout:
+                print("[VGC-EMU] Emulator vgc service is RUNNING")
+                return True
+            else:
+                print("[VGC-EMU] Warning: Service may not be running, but continuing anyway")
+                return True
+                
+        except subprocess.TimeoutExpired:
+            print("[VGC-EMU] Warning: Service creation/start timed out (continuing anyway)")
+            return True
+        except Exception as e:
+            print(f"[VGC-EMU] Warning: Could not create emulator service: {e} (continuing anyway)")
+            return True
     
     def restore_vanguard_service(self):
         """Restore VGC service to original state (optional cleanup)"""
