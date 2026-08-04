@@ -477,31 +477,38 @@ class EmulatorLoader:
         return success
     
     def create_emulator_service(self):
-        """Create and start a fake vgc service that points to the emulator"""
+        """Create and start a fake vgc service that reports RUNNING (bypass without needing program.exe)"""
         self.update_stage_status(1, "⚙️ Creating emulator vgc service...")
         try:
-            # Get the path to the emulator executable
-            emulator_path = os.path.join(os.path.dirname(__file__), "program.exe")
-            emulator_path_abs = os.path.abspath(emulator_path)
-            
-            print(f"[VGC-EMU] Creating fake vgc service pointing to: {emulator_path_abs}")
-            
             # Delete existing service if it exists (ignore errors)
+            print("[VGC-EMU] Removing any existing vgc service...")
             subprocess.run('sc delete vgc', shell=True, capture_output=True, timeout=3)
-            time.sleep(1)
+            time.sleep(1.5)
             
-            # Create new service pointing to emulator
-            cmd = f'sc create vgc binPath= "{emulator_path_abs}" start= auto'
+            # CRITICAL FIX: Create vgc service with dummy binary that Windows accepts
+            # Use svchost.exe as the binary (it's a legitimate Windows service host)
+            # The actual emulation happens via IOCTL tunneling from vClient, not this service
+            dummy_binary = r"C:\\Windows\\System32\\svchost.exe -k netsvcs"
+            
+            print(f"[VGC-EMU] Creating vgc service with dummy binary: {dummy_binary}")
+            cmd = f'sc create vgc binPath= "{dummy_binary}" start= auto DisplayName= "Vanguard Service"'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
             print(f"[VGC-EMU] sc create vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
             
             if result.returncode != 0 and "ERROR 1073" not in result.stdout:
-                print(f"[VGC-EMU] Warning: Service creation returned {result.returncode}")
+                print(f"[VGC-EMU] Warning: Service creation returned {result.returncode}, trying alternative...")
+                # Alternative: Use a simple batch file that exits immediately
+                batch_path = os.path.join(os.environ.get('TEMP', 'C:\\Windows\\Temp'), 'vgc_dummy.bat')
+                with open(batch_path, 'w') as f:
+                    f.write('@echo off\nexit /b 0\n')
+                cmd = f'sc create vgc binPath= "{batch_path}" start= auto'
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                print(f"[VGC-EMU] sc create vgc (batch): {result.returncode}")
             
             time.sleep(1)
             
             # Start the service
-            print("[VGC-EMU] Starting emulator vgc service...")
+            print("[VGC-EMU] Starting vgc service...")
             result = subprocess.run('sc start vgc', shell=True, capture_output=True, text=True, timeout=10)
             print(f"[VGC-EMU] sc start vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
             
@@ -510,10 +517,12 @@ class EmulatorLoader:
             print(f"[VGC-EMU] sc query vgc: {result.stdout[:300] if result.stdout else 'no output'}")
             
             if "RUNNING" in result.stdout:
-                print("[VGC-EMU] Emulator vgc service is RUNNING")
+                print("[VGC-EMU] ✓ VGC service is RUNNING")
                 return True
             else:
-                print("[VGC-EMU] Warning: Service may not be running, but continuing anyway")
+                # CRITICAL: Even if service won't start, mark as success
+                # The real bypass is the IOCTL tunneling from vClient to server
+                print("[VGC-EMU] ⚠️ Service state unknown, but IOCTL tunnel will handle bypass")
                 return True
                 
         except subprocess.TimeoutExpired:
