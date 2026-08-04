@@ -79,13 +79,17 @@ def build_gateway_envelope(
     changelist = build_info.get('changelist', 5092570)
     client_info.extend(_encode_protobuf_field(4, 0, _encode_varint(changelist)))
     
-    # Subfield 5: RSA public key (if provided)
+    # Subfield 5: RSA public key (DER binary format)
     if rsa_spki_pem:
-        # Extract DER from PEM for compact representation
-        pem_lines = rsa_spki_pem.split(b'\n')
-        der_b64 = b''.join(line.strip() for line in pem_lines 
-                          if not line.startswith(b'-----'))
-        client_info.extend(_encode_protobuf_field(5, 2, der_b64[:128]))  # Truncate for size
+        try:
+            import base64
+            pem_lines = rsa_spki_pem.split(b'\n')
+            der_b64 = b''.join(line.strip() for line in pem_lines 
+                              if line.strip() and not line.startswith(b'-----'))
+            der_bytes = base64.b64decode(der_b64)
+            client_info.extend(_encode_protobuf_field(5, 2, der_bytes))
+        except Exception:
+            pass
     
     envelope.extend(_encode_protobuf_field(3, 2, bytes(client_info)))
     
@@ -98,16 +102,16 @@ def build_gateway_envelope(
     os_info = bytearray()
     
     # Subfield 1: platform (varint) - 1=Windows
-    os_info.extend(_encode_protobuf_field(1, 0, b'\x01'))
+    os_info.extend(_encode_protobuf_field(1, 0, _encode_varint(1)))
     
     # Subfield 2: architecture (varint) - 2=x64
-    os_info.extend(_encode_protobuf_field(2, 0, b'\x02'))
+    os_info.extend(_encode_protobuf_field(2, 0, _encode_varint(2)))
     
     # Subfield 3: version (string) - "10.0.19045" (Windows 10 21H2)
     os_info.extend(_encode_protobuf_field(3, 2, b'10.0.19045'))
     
-    # Subfield 4: variant (varint) - 1=Pro (NOT 6, that triggers VAL 5!)
-    os_info.extend(_encode_protobuf_field(4, 0, b'\x01'))
+    # Subfield 4: variant (varint) - 1=Pro
+    os_info.extend(_encode_protobuf_field(4, 0, _encode_varint(1)))
     
     envelope.extend(_encode_protobuf_field(5, 2, bytes(os_info)))
     
