@@ -777,7 +777,8 @@ static bool PostToGatewaySingle(const wchar_t* gw_host,
     headers += L"Connection: Keep-Alive\r\n";
     headers += L"Content-Type: application/x-protobuf\r\n";
     headers += L"Accept: */*\r\n";
-    headers += L"Expect: \r\n";
+    headers += L"X-Riot-ClientVersion: release-13.02-shipping-5092570-5092570\r\n";
+    headers += L"X-Riot-ClientPlatform: ew0KCSJwbGF0Zm9ybVR5cGUiOiAiV2luZG93cyIsDQoJInBsYXRmb3JtT1MiOiAiV2luZG93cyIsDQoJInBsYXRmb3JtT1NWZXJzaW9uIjogIjEwLjAuMTkwNDUuMS4yNTYuNjRCaXQiLA0KCSJwbGF0Zm9ybUNoaXBzZXQiOiAiVW5rbm93biINCn0=\r\n";
 
     if (!auth_bearer.empty()) {
         std::wstring wa(auth_bearer.begin(), auth_bearer.end());
