@@ -1,0 +1,8 @@
+{"type": "session_auth", "sequence": 0, "timestamp_server": 1785868956455, "status": "created", "latency_ms": null, "reason": null, "meta": {"client_ip": "192.168.1.94", "client_ts_ms": 1785868956430, "region": "la", "puuid": "76756428-43d0-598f-9916-fa7a44836765", "valorant_pid": 572, "jwt_len": 994, "riot_account": "76756428-43d0-598f-9916-fa7a44836765", "hostname": "DESKTOP-L90GD1K", "gateway_machine_id": "o\ufffdK\ufffd=\ufffd\ufffd\u001bV\ufffd\ufffd_W\ufffd\u0005\u0004\ufffd\ufffdT\ufffd*\ufffd\u0014Z\ufffd\ufffd\ufffd[\ufffd\ufffd\u03eb", "hwid_fingerprint_hex": "6fec4bc83dccde1b56a7ff5f57800504aedc54bf2ae6145abf9cfa5bf7ddcfab"}}
+{"type": "jwt_update", "sequence": 0, "timestamp_server": 1785868956504, "status": "ok", "latency_ms": null, "reason": "puuid=76756428"}
+{"type": "heartbeat", "sequence": 1, "timestamp_server": 1785868956562, "status": "ok", "latency_ms": 44, "reason": null}
+{"type": "container", "sequence": 0, "timestamp_server": 1785868956573, "status": "provisioned", "latency_ms": null, "reason": "cid=2cf51287 pid=572 jwt_len=994 provision_ms=102"}
+{"type": "heartbeat", "sequence": 2, "timestamp_server": 1785868972752, "status": "ok", "latency_ms": 20, "reason": null}
+{"type": "heartbeat", "sequence": 3, "timestamp_server": 1785868988797, "status": "ok", "latency_ms": 23, "reason": null}
+{"type": "heartbeat", "sequence": 4, "timestamp_server": 1785869003845, "status": "ok", "latency_ms": 25, "reason": null}
+{"type": "heartbeat", "sequence": 5, "timestamp_server": 1785869018887, "status": "ok", "latency_ms": 20, "reason": null}

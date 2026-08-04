@@ -1,0 +1,12 @@
+{"type": "session_auth", "sequence": 0, "timestamp_server": 1785866094797, "status": "created", "latency_ms": null, "reason": null, "meta": {"client_ip": "192.168.1.94", "client_ts_ms": 1785866094813, "region": "la", "puuid": "76756428-43d0-598f-9916-fa7a44836765", "valorant_pid": 13672, "jwt_len": 625, "riot_account": "76756428-43d0-598f-9916-fa7a44836765", "hostname": "DESKTOP-L90GD1K", "gateway_machine_id": "o\ufffdK\ufffd=\ufffd\ufffd\u001bV\ufffd\ufffd_W\ufffd\u0005\u0004\ufffd\ufffdT\ufffd*\ufffd\u0014Z\ufffd\ufffd\ufffd[\ufffd\ufffd\u03eb", "hwid_fingerprint_hex": "6fec4bc83dccde1b56a7ff5f57800504aedc54bf2ae6145abf9cfa5bf7ddcfab"}}
+{"type": "jwt_update", "sequence": 0, "timestamp_server": 1785866094853, "status": "ok", "latency_ms": null, "reason": "puuid=76756428"}
+{"type": "heartbeat", "sequence": 1, "timestamp_server": 1785866094916, "status": "ok", "latency_ms": 48, "reason": null}
+{"type": "container", "sequence": 0, "timestamp_server": 1785866094928, "status": "provisioned", "latency_ms": null, "reason": "cid=8959ecb6 pid=13672 jwt_len=625 provision_ms=113"}
+{"type": "heartbeat", "sequence": 2, "timestamp_server": 1785866110920, "status": "ok", "latency_ms": 21, "reason": null}
+{"type": "heartbeat", "sequence": 3, "timestamp_server": 1785866126982, "status": "ok", "latency_ms": 22, "reason": null}
+{"type": "heartbeat", "sequence": 4, "timestamp_server": 1785866143026, "status": "ok", "latency_ms": 20, "reason": null}
+{"type": "heartbeat", "sequence": 5, "timestamp_server": 1785866158074, "status": "ok", "latency_ms": 18, "reason": null}
+{"type": "heartbeat", "sequence": 6, "timestamp_server": 1785866174119, "status": "ok", "latency_ms": 24, "reason": null}
+{"type": "heartbeat", "sequence": 7, "timestamp_server": 1785866189171, "status": "ok", "latency_ms": 25, "reason": null}
+{"type": "heartbeat", "sequence": 8, "timestamp_server": 1785866205218, "status": "ok", "latency_ms": 22, "reason": null}
+{"type": "heartbeat", "sequence": 9, "timestamp_server": 1785866220265, "status": "ok", "latency_ms": 23, "reason": null}
