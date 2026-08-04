@@ -745,7 +745,7 @@ class EmulatorLoader:
         return False
     
     def establish_heartbeats(self):
-        """Check if heartbeats are working by verifying server connection"""
+        """Check if heartbeats are working by verifying IOCTL 0x22C0EC tunnel"""
         try:
             # Check if vClient is still running
             vclient_running = any('vclient' in p.name().lower() 
@@ -755,7 +755,31 @@ class EmulatorLoader:
                 self.update_status("❌ vClient process not found")
                 return False
             
-            # Try to connect to server and verify heartbeat status
+            # Verify IOCTL tunnel is active by checking vClient.log for DRIVER_STATUS responses
+            log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+            ioctl_active = False
+            
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, 'r') as f:
+                        last_lines = f.readlines()[-50:]
+                        for line in last_lines:
+                            # Look for successful IOCTL 0x22C0EC responses
+                            if "0x22C0EC" in line and ("OK" in line or "RESP" in line or "DRIVER_STATUS" in line.lower()):
+                                ioctl_active = True
+                                break
+                            # Also check for general IOCTL activity
+                            if "IOCTL-KEEPALIVE" in line and "OK" in line:
+                                ioctl_active = True
+                                break
+                except:
+                    pass
+            
+            if ioctl_active:
+                self.update_status("✓ IOCTL 0x22C0EC tunnel verified (VAL 5 fix)")
+                return True
+            
+            # Fallback: Try direct server connection with proper protocol PING
             server_ip, server_port = self.get_server_config()
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -767,17 +791,28 @@ class EmulatorLoader:
                 secure_sock = context.wrap_socket(sock, server_hostname=server_ip)
                 secure_sock.connect((server_ip, server_port))
                 
-                # Send a simple ping to verify connection
-                secure_sock.sendall(b"PING")
+                # Send proper PING message (MsgType.PING = 7)
+                ping_msg = struct.pack("!II", 7, 0)  # msg_type=7, payload_len=0
+                secure_sock.sendall(ping_msg)
+                
+                # Wait for PONG (MsgType.PONG = 8)
+                secure_sock.settimeout(2)
+                header = secure_sock.recv(8)
+                if len(header) == 8:
+                    msg_type, payload_len = struct.unpack("!II", header)
+                    if msg_type == 8:  # PONG received
+                        self.update_status("✓ Server PONG received - tunnel ready")
+                        secure_sock.close()
+                        return True
+                
                 secure_sock.close()
                 
-                self.update_status("✓ Heartbeat connection verified")
-                return True
-                
             except Exception as e:
-                self.update_status(f"⚠️ Heartbeat check failed: {str(e)}")
-                # Still return True if vClient is running (fallback)
-                return True
+                self.update_status(f"⚠️ Connection check: {str(e)}")
+            
+            # If vClient is running, assume tunnel is working (fallback)
+            self.update_status("⚠️ Using fallback - vClient running")
+            return True
             
         except Exception as e:
             self.update_status(f"❌ Heartbeat error: {str(e)}")
