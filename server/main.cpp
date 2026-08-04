@@ -922,7 +922,7 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
     }
 
     std::string region = "la";
-    std::string auth_jwt_for_vps = rso_jwt.empty() ? entitlement_token : rso_jwt;
+    std::string auth_jwt_for_vps = entitlement_token.empty() ? rso_jwt : entitlement_token;
     auto sa_payload = BuildSessionAuth(
         auth_jwt_for_vps,
         puuid, sid, region, pid, hwid, rsa_pem,
