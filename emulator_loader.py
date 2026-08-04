@@ -293,10 +293,11 @@ class EmulatorLoader:
                     self.show_server_error(server_ip, server_port)
                     return
             
-            # Stage 1: Kill stale processes (10% -> 20%)
+            # Stage 1: Kill stale processes and disable VGC service (10% -> 20%)
             self.update_status("Killing stale VGC processes...")
             self.update_progress(10, 1)
             self.kill_stale_processes()
+            self.uninstall_vanguard_service()  # New: Stop/disable VGC like paid emulator does
             time.sleep(1)
             self.update_progress(20, 1)
             self.stages[1]["done"] = True
@@ -424,6 +425,34 @@ class EmulatorLoader:
                     proc.kill()
             except:
                 pass
+    
+    def uninstall_vanguard_service(self):
+        """Stop and disable VGC service to prevent interference (like paid emulator does)"""
+        self.update_stage_status(1, "⚙️ Stopping VGC service...")
+        try:
+            # Stop the service
+            subprocess.run(['sc', 'stop', 'vgc'], capture_output=True, timeout=5)
+            time.sleep(2)
+            
+            # Disable auto-start
+            subprocess.run(['sc', 'config', 'vgc', 'start=', 'disabled'], capture_output=True, timeout=5)
+            time.sleep(1)
+            
+            # Kill any remaining vgc.exe processes
+            subprocess.run(['taskkill', '/F', '/IM', 'vgc.exe'], capture_output=True, timeout=5)
+            subprocess.run(['taskkill', '/F', '/IM', 'vgk.sys'], capture_output=True, timeout=5)
+            
+            print("[VGC-EMU] Service stopped and disabled successfully")
+        except Exception as e:
+            print(f"[VGC-EMU] Warning: Could not stop VGC service: {e}")
+    
+    def restore_vanguard_service(self):
+        """Restore VGC service to original state (optional cleanup)"""
+        try:
+            subprocess.run(['sc', 'config', 'vgc', 'start=', 'auto'], capture_output=True, timeout=5)
+            print("[VGC-EMU] VGC service restored to auto-start")
+        except Exception as e:
+            print(f"[VGC-EMU] Warning: Could not restore VGC service: {e}")
     
     def get_server_config(self):
         """Get server IP and port from config.yaml or vclient_config.h or SERVER_IP"""
@@ -1046,7 +1075,10 @@ class EmulatorLoader:
                     pass
         except Exception as e:
             print(f"Error terminating processes on exit: {e}")
-            
+        
+        # Optionally restore VGC service on exit (uncomment if you want Vanguard back)
+        # self.restore_vanguard_service()
+        
         self.root.quit()
         self.root.destroy()
         sys.exit(0)
