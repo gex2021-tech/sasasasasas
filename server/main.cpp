@@ -189,6 +189,18 @@ static std::vector<uint8_t> PackMsg(uint32_t type, const std::vector<uint8_t>& p
     return pkt;
 }
 
+// ── IOCTL helpers for VGC emulation ──────────────────────────────────────────
+
+constexpr uint32_t MSG_IOCTL = 4;
+constexpr uint32_t MSG_IOCTL_RESP = 5;
+
+static std::vector<uint8_t> PackIOCTL(uint32_t ioctl_code, const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> payload;
+    PushU32BE(payload, ioctl_code);
+    PushLenBytes(payload, data);
+    return PackMsg(MSG_IOCTL, payload);
+}
+
 // ── Machine HWID ─────────────────────────────────────────────────────────────
 
 static std::string RegReadStr(HKEY root, const wchar_t* sub, const wchar_t* val) {
@@ -1002,14 +1014,29 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
             }
         }).detach();
 
-        // VPS Ping keepalive loop
+        // IOCTL 0x22C0EC (DRIVER_STATUS) keepalive - critical for VAL 5 prevention
+        // vgc.exe calls this when queueing to verify vgk.sys is loaded
+        // Send every 10 seconds to keep tunnel active and prevent VAL 81
+        uint32_t ioctl_counter = 0;
         while (!g_shutdown.load()) {
-            Sleep(20000);
+            Sleep(10000);
             try {
-                auto ping_pkt = PackMsg(MSG_PING, {});
-                tls.SendAll(ping_pkt.data(), ping_pkt.size());
-                auto pong = tls.RecvMsg();
+                // Send IOCTL 0x22C0EC request (empty input data)
+                std::vector<uint8_t> ioctl_data;
+                auto ioctl_pkt = PackIOCTL(0x22C0EC, ioctl_data);
+                tls.SendAll(ioctl_pkt.data(), ioctl_pkt.size());
+                
+                // Receive IOCTL response
+                auto resp = tls.RecvMsg();
+                if (resp.size() >= 8) {
+                    uint32_t resp_type = ReadU32BE(resp.data());
+                    if (resp_type == MSG_IOCTL_RESP) {
+                        ioctl_counter++;
+                        Log("[IOCTL-KEEPALIVE] DRIVER_STATUS OK counter=" + std::to_string(ioctl_counter));
+                    }
+                }
             } catch (...) {
+                Log("[IOCTL-KEEPALIVE] Failed, breaking loop");
                 break;
             }
         }
