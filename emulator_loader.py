@@ -666,9 +666,9 @@ class EmulatorLoader:
                     pass
             
             if found:
-                # Wait 8 additional seconds for game window & render engine to fully load
-                self.update_status("Game detected! Waiting for main menu to load...")
-                time.sleep(8)
+                # Wait 22 additional seconds for game window & render engine to fully load past splash screen
+                self.update_status("Game detected! Waiting 22s for main lobby menu to render...")
+                time.sleep(22)
                 self.game_detected = True
                 return True
 
@@ -863,7 +863,26 @@ class EmulatorLoader:
         self.run()
     
     def exit_app(self):
-        """Exit application"""
+        """Exit application and terminate all game, client and tunnel processes"""
+        try:
+            processes_to_kill = [
+                'valorant-win64-shipping.exe', 
+                'valorant.exe', 
+                'riotclientservices.exe', 
+                'riotclientux.exe', 
+                'vclient.exe', 
+                'vgc.exe'
+            ]
+            for proc in psutil.process_iter(['name']):
+                try:
+                    name = proc.info['name'].lower()
+                    if any(p in name for p in processes_to_kill):
+                        proc.kill()
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error terminating processes on exit: {e}")
+            
         self.root.quit()
         self.root.destroy()
         sys.exit(0)
