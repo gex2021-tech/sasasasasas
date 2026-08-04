@@ -117,7 +117,7 @@ class TunnelServer:
                                 session_id=sid,
                                 hwid_hex=auth.hwid_fingerprint.hex() if auth.hwid_fingerprint else "",
                                 puuid=auth.puuid,
-                                region=auth.region,
+                                region=auth.region.strip() if auth.region else "la",
                                 build_info=build_info,
                                 rsa_spki_pem=auth.rsa_spki_pem,
                                 timestamp_ms=timestamp_ms
