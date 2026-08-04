@@ -385,7 +385,7 @@ static std::vector<uint8_t> GenerateRsaSpkiPem() {
 
 static std::string FetchEntitlementsToken(const std::string& rso_jwt) {
     HINTERNET hS = WinHttpOpen(
-        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.00.00.4990475",
+        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5092570",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hS) { Log("[ENT] WinHttpOpen failed"); return ""; }
@@ -441,7 +441,7 @@ static std::string FetchEntitlementsToken(const std::string& rso_jwt) {
 
 static std::string FetchIdJwt(const std::string& rso_jwt) {
     HINTERNET hS = WinHttpOpen(
-        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.00.00.4990475",
+        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5092570",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hS) { Log("[IDT] WinHttpOpen failed"); return ""; }
@@ -534,10 +534,10 @@ static std::vector<uint8_t> BuildSessionAuth(
 
     PushLenBytes(body, rsa_spki_pem);
 
-    PushLenStr(body, "release-13.00-shipping-30-4955671");
-    PushU32BE(body, 4955671);
+    PushLenStr(body, "release-13.02-shipping-7-5092570");
+    PushU32BE(body, 5092570);
     PushU32BE(body, 13);
-    PushU32BE(body, 0);
+    PushU32BE(body, 2);
     PushU32BE(body, 30);
     PushU32BE(body, 0);
 
