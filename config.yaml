@@ -12,6 +12,11 @@ tunnel:
   tls_cert: "certs/server.pem"
   tls_key: "certs/server.key"
   max_clients: 32
+  
+# Secrets for HMAC signing (change these in production!)
+secrets:
+  gateway_secret: "vgc_gateway_secret_change_in_prod"
+  auth_key: "vgc_auth_key_2024_change_in_prod"
 
 # ==========================================
 # 2. PC CLIENTE (Tu PC Gaming)

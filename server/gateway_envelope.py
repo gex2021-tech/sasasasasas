@@ -136,8 +136,14 @@ class SmartGatewayMinty:
     
     def _build_access_token(self, puuid: str, entitlement: str, id_token: str) -> str:
         """Build access token from components"""
+        # Load secrets from config instead of hardcoded values
+        from pathlib import Path
+        from .config import load_config
+        cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
+        secret = cfg.get("secrets", {}).get("gateway_secret", "vgc_gateway_secret").encode()
+        
         combined = f"{entitlement}:{id_token}:{puuid}"
-        access_hash = hmac.new(b"vgc_gateway_secret", combined.encode(), hashlib.sha256).hexdigest()
+        access_hash = hmac.new(secret, combined.encode(), hashlib.sha256).hexdigest()
         return f"vgc_at_{access_hash}"
     
     def _determine_region(self, puuid: str) -> str:
@@ -153,6 +159,12 @@ class SmartGatewayMinty:
     
     def build_auth_payload(self, tokens: GatewayTokens, machine_profile: Dict) -> bytes:
         """Build standalone protobuf+crypto auth payload"""
+        # Load secrets from config instead of hardcoded values
+        from pathlib import Path
+        from .config import load_config
+        cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
+        auth_secret = cfg.get("secrets", {}).get("auth_key", "vgc_auth_key_2024").encode()
+        
         payload = bytearray()
         
         payload.extend(self._encode_string_field(1, tokens.entitlement_token))
@@ -166,7 +178,7 @@ class SmartGatewayMinty:
         timestamp_ms = int(time.time() * 1000)
         payload.extend(self._encode_varint_field(6, timestamp_ms))
         
-        signature = hmac.new(b"vgc_auth_key_2024", bytes(payload), hashlib.sha256).digest()
+        signature = hmac.new(auth_secret, bytes(payload), hashlib.sha256).digest()
         payload.extend(self._encode_bytes_field(7, signature))
         
         return bytes(payload)
