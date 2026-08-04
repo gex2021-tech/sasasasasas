@@ -297,8 +297,11 @@ class EmulatorLoader:
             self.update_status("Killing stale VGC processes...")
             self.update_progress(10, 1)
             self.kill_stale_processes()
-            self.uninstall_vanguard_service()  # New: Stop/disable VGC like paid emulator does
-            time.sleep(1)
+            try:
+                self.uninstall_vanguard_service()  # New: Stop/disable VGC like paid emulator does
+            except Exception as e:
+                print(f"[VGC-EMU] Non-fatal error in uninstall_vanguard_service: {e}")
+            time.sleep(0.5)
             self.update_progress(20, 1)
             self.stages[1]["done"] = True
             
@@ -419,32 +422,58 @@ class EmulatorLoader:
     def kill_stale_processes(self):
         """Kill old VGC/vClient processes"""
         processes_to_kill = ['vgc', 'vgk', 'vClient']
+        killed = []
         for proc in psutil.process_iter(['name']):
             try:
                 if any(name.lower() in proc.info['name'].lower() for name in processes_to_kill):
                     proc.kill()
+                    killed.append(proc.info['name'])
             except:
                 pass
+        print(f"[VGC-EMU] Killed stale processes: {killed if killed else 'none'}")
     
     def uninstall_vanguard_service(self):
         """Stop and disable VGC service to prevent interference (like paid emulator does)"""
         self.update_stage_status(1, "⚙️ Stopping VGC service...")
+        success = False
         try:
-            # Stop the service
-            subprocess.run(['sc', 'stop', 'vgc'], capture_output=True, timeout=5)
-            time.sleep(2)
-            
-            # Disable auto-start
-            subprocess.run(['sc', 'config', 'vgc', 'start=', 'disabled'], capture_output=True, timeout=5)
+            # Stop the service - use shell=True and capture output properly
+            print("[VGC-EMU] Attempting to stop VGC service...")
+            result = subprocess.run(
+                'sc stop vgc',
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            print(f"[VGC-EMU] sc stop vgc: {result.returncode} - {result.stdout[:100] if result.stdout else 'no output'}")
             time.sleep(1)
             
-            # Kill any remaining vgc.exe processes
-            subprocess.run(['taskkill', '/F', '/IM', 'vgc.exe'], capture_output=True, timeout=5)
-            subprocess.run(['taskkill', '/F', '/IM', 'vgk.sys'], capture_output=True, timeout=5)
+            # Disable auto-start
+            result = subprocess.run(
+                'sc config vgc start= disabled',
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            print(f"[VGC-EMU] sc config vgc: {result.returncode}")
+            time.sleep(0.5)
             
+            # Kill any remaining vgc.exe processes
+            subprocess.run('taskkill /F /IM vgc.exe', shell=True, capture_output=True, timeout=2)
+            subprocess.run('taskkill /F /IM vgk.sys', shell=True, capture_output=True, timeout=2)
+            
+            success = True
             print("[VGC-EMU] Service stopped and disabled successfully")
+        except subprocess.TimeoutExpired:
+            print("[VGC-EMU] Warning: VGC service commands timed out (continuing anyway)")
         except Exception as e:
-            print(f"[VGC-EMU] Warning: Could not stop VGC service: {e}")
+            print(f"[VGC-EMU] Warning: Could not stop VGC service: {e} (continuing anyway)")
+        
+        # CRITICAL: Always mark as done even if VGC uninstall fails
+        # This prevents the loader from getting stuck here
+        return success
     
     def restore_vanguard_service(self):
         """Restore VGC service to original state (optional cleanup)"""
