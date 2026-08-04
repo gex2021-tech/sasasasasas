@@ -97,6 +97,18 @@ class SessionManager:
         riot_account = auth.riot_account or account_from_jwt(auth.jwt)
         puuid = auth.puuid or ""
 
+        # Purge stale/previous active sessions for the same PUUID to avoid duplicate sessions (VAL 5 trigger)
+        if puuid:
+            with self._lock:
+                to_destroy = [s_id for s_id, s in self._sessions.items() if s.client_puuid == puuid]
+                for old_sid in to_destroy:
+                    old_sess = self._sessions.pop(old_sid, None)
+                    if old_sess:
+                        log.info("purging old duplicate session=%s for puuid=%s", old_sid[:8], puuid[:8])
+                        self.wm.destroy(old_sess.container_id)
+                        self.crypto.unmount(old_sid)
+                        self.sched.stop(old_sid)
+
         session_id = str(uuid.uuid4())
         session = Session(
             session_id=session_id,
