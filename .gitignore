@@ -1,5 +1,10 @@
-(config.yaml and server/gateway_envelope.py are source/config files, no build artifacts, dependencies, or temp files in the changes)
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-```python
-
+# Logs
+*.log
 ```
