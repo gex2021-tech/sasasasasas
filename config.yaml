@@ -20,7 +20,11 @@ paths:
   fallback_cache: "data/fallback_cache.json"
 
 wine:
-  enabled: false
+  enabled: true
+  program_path: "server/program.exe"
+  ready_timeout_sec: 30
+  ipc_timeout_ms: 5000
+  work_dir: "data/containers"
 
 gateway:
   region: "la"
