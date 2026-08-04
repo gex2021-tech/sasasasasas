@@ -38,18 +38,25 @@ def build_gateway_envelope(
     rsa_spki_pem: bytes,
     timestamp_ms: int
 ) -> bytes:
-    """Builds a Vanguard gateway protobuf envelope (293-byte official template)
-    patched with session-specific timestamp and identifiers.
-    """
-    # Use official 293-byte Vanguard gateway envelope template
-    envelope = bytearray(FALLBACK_TOKEN)
+    """Builds a Vanguard gateway protobuf envelope with freshly signed F1 and F15 tokens."""
+    envelope = bytearray()
     
-    # Patch timestamp (fixed64 at offset 4 or lower bits)
-    ts_bytes = struct.pack("<Q", timestamp_ms)
+    # Field 1: Protocol version = 1
+    envelope.extend(_encode_protobuf_field(1, 0, _encode_varint(1)))
     
-    # Apply rolling HMAC noise bound to session_id
-    from .vgc_crypto import _noise_token
-    patched = _noise_token(bytes(envelope), session_id, 1, time.time())
+    # Field 2: F1 Token (proper 6-component structure with valid HMAC signatures)
+    try:
+        hwid_bytes = bytes.fromhex(hwid_hex) if hwid_hex else os.urandom(32)
+    except ValueError:
+        hwid_bytes = os.urandom(32)
+        
+    f1_token = build_f1_token(puuid, hwid_bytes, timestamp_ms)
+    envelope.extend(_encode_protobuf_field(2, 2, f1_token))
     
-    return patched
+    # Field 15: F15 Token (Base64 SHA1 hash of F1 + version + fixed_suffix)
+    vanguard_version = "1.18.3.74"
+    f15_token = build_f15_token(f1_token, vanguard_version)
+    envelope.extend(_encode_protobuf_field(15, 2, f15_token.encode('utf-8')))
+    
+    return bytes(envelope)
 
