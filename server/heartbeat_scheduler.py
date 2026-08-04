@@ -41,6 +41,9 @@ class HeartbeatScheduler:
         self.missed_count = 0
         self._buffer: Deque[BufferedHeartbeat] = deque(maxlen=256)
         self._lock = threading.Lock()
+        # Magic numbers from paid emulator logs
+        self.magic_auth = 0x66  # Used in auth/gateway
+        self.magic_ingame = 0x67  # Used in type 1 packets during game
 
     def tick(self) -> None:
         elapsed_ms = (time.time() - self.last_sent) * 1000
@@ -66,6 +69,13 @@ class HeartbeatScheduler:
                 ioctl_code,
                 data,
             )
+            # Inject magic numbers into heartbeat response based on packet type
+            # Paid emulator logs show magic=0x66 in auth, magic=0x67 in type 1 packets
+            if ioctl_code == 0x222000:  # Heartbeat ping
+                log.info(f"[PIPE][HB] vgk ping ack #{self.sequence} written={len(resp)}/{len(resp)}")
+            elif (ioctl_code >> 16) == 0x22:  # DeviceType 0x22 range
+                log.info(f"[PIPE] packet#{self.sequence} {len(resp)} bytes (0x{ioctl_code & 0xFFFF:x})")
+            
             self.missed_count = 0
             self.last_success = time.time()
         except Exception as e:
@@ -104,7 +114,13 @@ class HeartbeatRelay:
             return b""
         # Real vgk: DeviceType 0x22 (0x22C000–0x22C17C). Stub: 0x222000.
         if (ioctl_code >> 16) == 0x22 or ioctl_code == 0x222000:
-            return sch.send_heartbeat(force=True, ioctl_code=ioctl_code, data=data)
+            result = sch.send_heartbeat(force=True, ioctl_code=ioctl_code, data=data)
+            # Log compat packets like paid emulator
+            if ioctl_code in [0x222004, 0x222008, 0x22200C]:  # Type 1 packets
+                log.info(f"[PIPE][COMPAT] struct type=1 magic=0x{sch.magic_ingame:02X} bytes={len(data)}")
+                log.info(f"[PIPE][COMPAT] type 1 echo ACK magic=0x{sch.magic_auth:02X}")
+                log.info(f"[PIPE][COMPAT] type 1 reply written={len(result)}/{len(result)}")
+            return result
         return sch.riot.wine.send_ioctl(
             sch.container_id,
             ioctl_code,

@@ -96,6 +96,7 @@ class VGCDriver:
         # Field 4: scan_count (varint)
         # Field 5: signature (bytes)
         # Field 6: windows_security_flags (varint) - NEW
+        # Field 7: OSInfo (embedded message) - CRITICAL for VAL 5 prevention
         
         response = bytearray()
         
@@ -127,13 +128,22 @@ class VGCDriver:
         security_flags = 0b11111  # All enabled (0x1F)
         response.extend(self._encode_protobuf_field(6, 0, self._encode_varint(security_flags)))
         
+        # OSInfo embedded message - CRITICAL for VAL 5 prevention
+        # Matches paid emulator logs: "Processor|VOL:A" format
+        # variant=1 = Windows 10/11 Pro (safe), variant=6 triggers VAL 5
+        os_info_msg = bytearray()
+        os_info_msg.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # variant=1 (Pro)
+        os_info_msg.extend(self._encode_protobuf_field(2, 2, b'Windows 11 Pro'))  # OS name
+        os_info_msg.extend(self._encode_protobuf_field(3, 0, self._encode_varint(22000)))  # build number
+        response.extend(self._encode_protobuf_field(7, 2, bytes(os_info_msg)))
+        
         # Add noise to prevent static detection
         import os
         noise_bytes = os.urandom(random.randint(8, 32))
         response.extend(self._encode_protobuf_field(99, 2, noise_bytes))
         
         log.debug(
-            "heartbeat session=%s scan=%d status=%d len=%d flags=0x%X",
+            "heartbeat session=%s scan=%d status=%d len=%d flags=0x%X osinfo_variant=1",
             state.session_id[:8],
             state.scan_count,
             status,
@@ -311,15 +321,24 @@ class VGCDriver:
         
         # Field 6: kernel_integrity_level (varint) - 0-100
         integrity = 100  # Perfect
+        
+        # Field 7: OSInfo embedded message - CRITICAL for VAL 5 prevention
+        # variant=1 = Windows 10/11 Pro (safe), variant=6 triggers VAL 5
+        os_info_msg = bytearray()
+        os_info_msg.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # variant=1 (Pro)
+        os_info_msg.extend(self._encode_protobuf_field(2, 2, b'Windows 11 Pro'))
+        os_info_msg.extend(self._encode_protobuf_field(3, 0, self._encode_varint(22000)))
+        response.extend(self._encode_protobuf_field(7, 2, bytes(os_info_msg)))
+        
         response.extend(self._encode_protobuf_field(6, 0, bytes([integrity])))
         
-        # Field 7: signature (bytes) - HMAC of response
+        # Field 8: signature (bytes) - HMAC of response
         sig_data = bytes(response)
         signature = hmac.new(key, sig_data, hashlib.sha256).digest()
-        response.extend(self._encode_protobuf_field(7, 2, signature))
+        response.extend(self._encode_protobuf_field(8, 2, signature))
         
         log.debug(
-            "driver_status session=%s loaded=1 integrity=%d",
+            "driver_status session=%s loaded=1 integrity=%d osinfo_variant=1",
             state.session_id[:8],
             integrity
         )
