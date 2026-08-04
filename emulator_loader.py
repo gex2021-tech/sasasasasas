@@ -15,6 +15,9 @@ import ssl
 import struct
 import json
 
+SERVER_IP = "192.168.1.136"   # <--- Cambia esto por la IP real de tu VPS / Servidor
+SERVER_PORT = 51820
+
 QUEUE_WINDOW_SEC = 240      # Ventana de 4 minutos segura para buscar partida (Queue)
 REAUTH_COOLDOWN_SEC = 60    # Cooldown de 60s para recargar / refrescar auth
 STATE_FILE = os.path.join(os.path.dirname(__file__), "data", "loader_state.json")
@@ -368,16 +371,33 @@ class EmulatorLoader:
                 pass
     
     def get_server_config(self):
-        """Get server IP and port from config.yaml or vclient_config.h"""
+        """Get server IP and port from config.yaml or vclient_config.h or SERVER_IP"""
         missing_data = []
         
-        # Try to read from vclient_config.h first (build-time config)
+        # Check config.yaml first (Option A & Tunnel config)
+        config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        if os.path.exists(config_path) and yaml:
+            try:
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f) or {}
+                    
+                    # Option A: Check client section first
+                    client_cfg = config.get('client', {})
+                    if 'server_ip' in client_cfg:
+                        host = client_cfg.get('server_ip', SERVER_IP)
+                        port = int(client_cfg.get('server_port', SERVER_PORT))
+                        if host == '127.0.0.1':
+                            missing_data.append("⚠️ Using localhost (127.0.0.1) - make sure server is on same PC")
+                        return host, port
+            except Exception as e:
+                missing_data.append(f"Error reading config.yaml client section: {e}")
+        
+        # Try to read from vclient_config.h (build-time config)
         config_h_path = os.path.join(os.path.dirname(__file__), "server", "vclient_config.h")
         if os.path.exists(config_h_path):
             try:
                 with open(config_h_path, 'r') as f:
                     content = f.read()
-                    # Parse VPS_HOST_AUTO and VPS_PORT_AUTO
                     import re
                     host_match = re.search(r'#define VPS_HOST_AUTO "([^"]+)"', content)
                     port_match = re.search(r'#define VPS_PORT_AUTO (\d+)', content)
@@ -385,7 +405,6 @@ class EmulatorLoader:
                         host = host_match.group(1)
                         port = int(port_match.group(1))
                         
-                        # Warn if using localhost (gaming PC = server PC, unusual setup)
                         if host == '127.0.0.1':
                             missing_data.append("⚠️ Using localhost (127.0.0.1) - gaming PC = server PC?")
                         
@@ -395,37 +414,28 @@ class EmulatorLoader:
                         return host, port
             except Exception as e:
                 missing_data.append(f"Error reading vclient_config.h: {e}")
-        else:
-            missing_data.append("vclient_config.h not found")
         
-        # Fallback: Try config.yaml
-        config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-        if os.path.exists(config_path):
+        # Fallback: Try tunnel section in config.yaml
+        if os.path.exists(config_path) and yaml:
             try:
-                if yaml:
-                    with open(config_path, 'r') as f:
-                        config = yaml.safe_load(f)
-                        host = config.get('tunnel', {}).get('host', '192.168.1.136')
-                        port = config.get('tunnel', {}).get('port', 51820)
-                        # Convert 0.0.0.0 to server PC IP for client connection
-                        if host == '0.0.0.0':
-                            host = '192.168.1.136'
-                            missing_data.append("⚠️ config.yaml has 0.0.0.0, using 192.168.1.136 (server PC)")
-                        
-                        if missing_data:
-                            self.show_config_warning(host, port, missing_data)
-                        
-                        return host, port
-                else:
-                    missing_data.append("PyYAML not installed - cannot read config.yaml")
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f) or {}
+                    host = config.get('tunnel', {}).get('host', SERVER_IP)
+                    port = int(config.get('tunnel', {}).get('port', SERVER_PORT))
+                    if host == '0.0.0.0':
+                        host = SERVER_IP
+                        missing_data.append(f"⚠️ config.yaml tunnel has 0.0.0.0, using server IP: {SERVER_IP}")
+                    
+                    if missing_data:
+                        self.show_config_warning(host, port, missing_data)
+                    
+                    return host, port
             except Exception as e:
-                missing_data.append(f"Error reading config.yaml: {e}")
-        else:
-            missing_data.append("config.yaml not found")
+                missing_data.append(f"Error reading config.yaml tunnel section: {e}")
         
-        # Default - show warning
-        host, port = '192.168.1.136', 51820
-        missing_data.append(f"⚠️ Using default: {host}:{port} (server PC IP)")
+        # Option B Default: Use SERVER_IP and SERVER_PORT
+        host, port = SERVER_IP, SERVER_PORT
+        missing_data.append(f"⚠️ Using default SERVER_IP/SERVER_PORT: {host}:{port}")
         self.show_config_warning(host, port, missing_data)
         
         return host, port
