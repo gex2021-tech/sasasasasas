@@ -185,9 +185,9 @@ private:
             std::vector<uint8_t> hmac_result(32);
             
             if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0) {
-                if (BCryptCreateHash(hAlg, &hHash, nullptr, 0, aes_key_.data(), (ULONG)aes_key_.size(), 0) == 0) {
-                    BCryptHashData(hHash, input.data(), (ULONG)input.size(), 0);
-                    BCryptFinishHash(hHash, hmac_result.data(), hashLen, 0);
+                if (BCryptCreateHash(hAlg, &hHash, nullptr, 0, (PUCHAR)aes_key_.data(), (ULONG)aes_key_.size(), 0) == 0) {
+                    BCryptHashData(hHash, (PUCHAR)input.data(), (ULONG)input.size(), 0);
+                    BCryptFinishHash(hHash, (PUCHAR)hmac_result.data(), hashLen, 0);
                     BCryptDestroyHash(hHash);
                 }
                 BCryptCloseAlgorithmProvider(hAlg, 0);
