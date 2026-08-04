@@ -112,8 +112,8 @@ def build_gateway_envelope(
     envelope.extend(_encode_protobuf_field(5, 2, bytes(os_info)))
     
     # Field 15: F15 Token (Base64 SHA1 hash of F1 + version + suffix)
-    client_version = f"{build_info.get('major', 1)}.{build_info.get('minor', 18)}.{build_info.get('patch', 3)}.74"
-    f15_token = build_f15_token(f1_token, client_version)
+    vanguard_version = "1.18.3.74"
+    f15_token = build_f15_token(f1_token, vanguard_version)
     envelope.extend(_encode_protobuf_field(15, 2, f15_token.encode('utf-8')))
     
     return bytes(envelope)
