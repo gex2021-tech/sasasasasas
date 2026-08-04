@@ -4,16 +4,26 @@ __pycache__/
 *.o
 *.obj
 *.out
+*.class
+*.dll
+*.so
+*.a
 
 # Dependencies
 .venv/
 venv/
 node_modules/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
 
 # Logs and temp files
 *.log
 *.tmp
 *.swp
+*.swo
 
 # Environment
 .env
@@ -24,51 +34,15 @@ node_modules/
 .vscode/
 .idea/
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# Python specific
-*.pyo
-*.pyd
-.Python
-*.so
-
-# Backup files
-*~
-*.bak
-*.swp
-*.swo
-
-# OS generated files
+# System files
 .DS_Store
 Thumbs.db
-ehthumbs.db
-Icon?
-.directory
-.Trashes
 
-# MyPy cache
-.mypy_cache/
-# Pytest cache
-.pytest_cache/
-
-# Gradle
-.gradle/
+# Build directories
+dist/
+build/
 target/
-
-# Temporary files
-*.tmp
-*.temp
-*.temp.*
-tmp/
-.temp/
+.gradle/
 
 # Compressed files
 *.zip
