@@ -139,9 +139,9 @@ static void WriteSessionAuthRegistry() {
 }
 
 static void EmulateVgcService() {
-    // Kill the real VGC service first
+    // Stop the real VGC service so vClient can bind the named pipes
     system("sc stop vgc >nul 2>&1");
-    system("sc config vgc start= disabled >nul 2>&1");
+    system("sc config vgc start= demand >nul 2>&1");
     Sleep(500);
     
     // Create the event Valorant checks

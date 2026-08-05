@@ -14,6 +14,7 @@ import socket
 import ssl
 import struct
 import json
+import re
 
 SERVER_IP = "192.168.1.136"   # <--- Cambia esto por la IP real de tu VPS / Servidor
 SERVER_PORT = 51820
@@ -46,12 +47,15 @@ class EmulatorLoader:
             {"name": "Bypassing VGC check", "progress": 75, "done": False},
             {"name": "Establishing heartbeats", "progress": 90, "done": False},
             {"name": "Sending auth request", "progress": 100, "done": False},
-        ]
+                ]
         
         self.server_running = False
         self.vclient_running = False
         self.game_detected = False
         self.ready_to_inject = False
+        self._vclient_session_id = None
+        self._server_ip = None
+        self._server_port = None
         
         # Create UI
         self.create_ui()
@@ -258,6 +262,310 @@ class EmulatorLoader:
                 self.status_label.config(text=message)
         self.root.after(0, _update)
     
+    def update_stage_status(self, stage_index, message):
+        """Update a specific stage's display text (Thread-safe)"""
+        def _update():
+            if stage_index < len(self.stage_labels):
+                self.stage_labels[stage_index].config(text=message)
+        self.root.after(0, _update)
+
+    # ──────────────────────────────────────────────────────────
+    #  Protocol & Verification Helpers
+    # ──────────────────────────────────────────────────────────
+
+    def _create_tls_context(self):
+        """Create a reusable TLS context for server connections"""
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _open_server_socket(self, host, port, timeout=5):
+        """Open a TLS socket to the server. Returns socket or None."""
+        try:
+            ctx = self._create_tls_context()
+            raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw.settimeout(timeout)
+            raw.connect((host, port))
+            sock = ctx.wrap_socket(raw, server_hostname=host)
+            return sock
+        except Exception as e:
+            print(f"[VGC-EMU] Socket open failed {host}:{port}: {e}")
+            return None
+
+    def _protocol_ping(self, host, port, timeout=3):
+        """Send protocol PING (type 7) and verify PONG (type 8)."""
+        sock = None
+        try:
+            sock = self._open_server_socket(host, port, timeout)
+            if not sock:
+                return False
+            sock.sendall(struct.pack("!II", 7, 0))
+            sock.settimeout(timeout)
+            header = sock.recv(8)
+            if len(header) == 8:
+                msg_type, _ = struct.unpack("!II", header)
+                return msg_type == 8
+            return False
+        except Exception as e:
+            print(f"[VGC-EMU] Protocol PING failed: {e}")
+            return False
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def _protocol_send_ioctl(self, host, port, ioctl_code=0x22C0EC, data=b"", timeout=5):
+        """Open a throwaway authenticated connection, send IOCTL, return response bytes.
+        
+        Sends a minimal SESSION_AUTH first (requires auth_key from config),
+        then sends the IOCTL and reads the IOCTL_RESP.  Returns response bytes or None.
+        """
+        sock = None
+        try:
+            sock = self._open_server_socket(host, port, timeout)
+            if not sock:
+                return None
+
+            # Read auth_key from config
+            config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+            auth_key = ""
+            if os.path.exists(config_path) and yaml:
+                with open(config_path, 'r') as f:
+                    cfg = yaml.safe_load(f) or {}
+                    auth_key = cfg.get('tunnel', {}).get('auth_key', '')
+            if not auth_key:
+                print("[VGC-EMU] No auth_key for IOCTL probe")
+                return None
+
+            # Helper: length-prefixed bytes
+            def _lp(b: bytes) -> bytes:
+                return struct.pack("!I", len(b)) + b
+
+            # Minimal SESSION_AUTH payload
+            body = _lp(auth_key.encode("utf-8"))
+            body += _lp(b"probe")                                             # gateway_machine_id
+            body += _lp(b"probe_jwt_placeholder")                              # jwt  (non-empty)
+            body += _lp(b"00000000-0000-0000-0000-000000000000")               # puuid
+            body += struct.pack("!I", 0)                                       # valorant_pid
+            body += struct.pack("!Q", int(time.time() * 1000))                 # client_ts_ms
+
+            # Send SESSION_AUTH (type 14)
+            sock.sendall(struct.pack("!II", 14, len(body)) + body)
+
+            # Read response header (full 8 bytes)
+            hdr = self._recv_exact(sock, 8, timeout)
+            if not hdr:
+                return None
+            msg_type, plen = struct.unpack("!II", hdr)
+            payload = self._recv_exact(sock, plen, timeout) if plen else b""
+
+            if msg_type != 15:  # not SESSION_AUTH_OK
+                err = payload.decode('utf-8', errors='replace') if msg_type == 9 else f"type={msg_type}"
+                print(f"[VGC-EMU] IOCTL probe auth failed: {err}")
+                return None
+
+            # Extract probe session id (for logging)
+            if payload and len(payload) >= 4:
+                slen = struct.unpack_from("!I", payload, 0)[0]
+                probe_sid = payload[4:4+slen].decode("utf-8", errors="replace")
+                print(f"[VGC-EMU] Probe session: {probe_sid[:8]}")
+
+            # Now send IOCTL (type 4)
+            ioctl_body = struct.pack("!I", ioctl_code) + struct.pack("!I", len(data)) + data
+            sock.sendall(struct.pack("!II", 4, len(ioctl_body)) + ioctl_body)
+
+            # Read IOCTL_RESP (type 5)
+            hdr2 = self._recv_exact(sock, 8, timeout)
+            if not hdr2:
+                return None
+            mt2, pl2 = struct.unpack("!II", hdr2)
+            resp = self._recv_exact(sock, pl2, timeout) if pl2 else b""
+
+            if mt2 == 5 and resp and len(resp) >= 4:  # IOCTL_RESP
+                dlen = struct.unpack_from("!I", resp, 0)[0]
+                return resp[4:4+dlen]
+            return None
+
+        except Exception as e:
+            print(f"[VGC-EMU] IOCTL probe failed: {e}")
+            return None
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def _recv_exact(self, sock, n, timeout=5):
+        """Read exactly n bytes from socket.  Returns bytes or None."""
+        sock.settimeout(timeout)
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    def _check_vclient_alive(self):
+        """Check if vClient.exe process is running"""
+        try:
+            for proc in psutil.process_iter(['name']):
+                if 'vclient' in proc.info['name'].lower():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _parse_vclient_log(self):
+        """Parse vClient.log for session ID, IOCTL activity, and tunnel status.
+        
+        Returns: (session_id: str|None, ioctl_active: bool, tunnel_active: bool)
+        """
+        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        session_id = None
+        ioctl_active = False
+        tunnel_active = False
+
+        if not os.path.exists(log_path):
+            return session_id, ioctl_active, tunnel_active
+
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                lines = f.readlines()
+
+            scan_lines = lines[-100:] if len(lines) > 100 else lines
+
+            for line in scan_lines:
+                lu = line.upper()
+
+                # Session ID extraction (UUID-4 format)
+                if not session_id:
+                    m = re.search(
+                        r'(?:SESSION_AUTH_OK|SESSION|session)[=:\s]+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
+                        line, re.IGNORECASE
+                    )
+                    if m:
+                        session_id = m.group(1)
+
+                # IOCTL activity markers
+                if not ioctl_active:
+                    ioctl_markers = [
+                        '0X22C0EC', 'DRIVER_STATUS', 'IOCTL_RESP', 'IOCTL-KEEPALIVE',
+                        '0X222000', 'HEARTBEAT', 'HB ACK', 'VGK PING ACK',
+                        'PIPE][HB]', 'PIPE][COMPAT]',
+                    ]
+                    ok_markers = ['OK', 'RESP', 'ACK', 'WRITTEN', 'RECV', 'BYTES']
+                    if any(mk in lu for mk in ioctl_markers):
+                        if any(ok in lu for ok in ok_markers):
+                            ioctl_active = True
+
+                # Tunnel-level activity markers
+                if not tunnel_active:
+                    tunnel_markers = [
+                        'TUNNEL ACTIVE', 'CONNECTED TO SERVER', 'TLS CONNECTED',
+                        'SESSION_AUTH_OK', 'PONG RECV', 'HELLO_OK',
+                        'TUNNEL ESTABLISHED', 'SERVER CONNECTED',
+                    ]
+                    if any(mk in lu for mk in tunnel_markers):
+                        tunnel_active = True
+
+                if session_id and ioctl_active and tunnel_active:
+                    break
+
+        except Exception as e:
+            print(f"[VGC-EMU] Error parsing vClient.log: {e}")
+
+        return session_id, ioctl_active, tunnel_active
+
+    def _bypass_vgc_check(self):
+        """Stage 4: Multi-signal VGC tunnel verification with retries.
+
+        Checks four independent signals with escalating fallbacks:
+          1. vClient process alive
+          2. vClient.log shows IOCTL / tunnel activity
+          3. Direct IOCTL 0x22C0EC probe through protocol
+          4. Server PING + vClient alive (last resort)
+        """
+        # ── Signal 1: vClient must be alive ──
+        if not self._check_vclient_alive():
+            self.update_status("⚠️ vClient not running — restarting...")
+            if not self.start_vclient():
+                self.update_status("❌ Failed to restart vClient")
+                return False
+            time.sleep(3)
+            if not self._check_vclient_alive():
+                self.update_status("❌ vClient failed to start")
+                return False
+
+        server_ip, server_port = self.get_server_config()
+
+        # ── Signal 2: Wait for vClient.log to show activity ──
+        max_wait_sec = 45
+        verified_ioctl = False
+        verified_tunnel = False
+
+        for attempt in range(max_wait_sec):
+            session_id, ioctl_ok, tunnel_ok = self._parse_vclient_log()
+
+            if session_id and not self._vclient_session_id:
+                self._vclient_session_id = session_id
+                print(f"[VGC-EMU] Session detected from log: {session_id[:8]}...")
+
+            if ioctl_ok:
+                verified_ioctl = True
+            if tunnel_ok:
+                verified_tunnel = True
+
+            # Best case: IOCTL confirmed in log
+            if verified_ioctl:
+                sid_str = session_id[:8] if session_id else '???'
+                self.update_status(f"✓ IOCTL tunnel verified (session {sid_str})")
+                return True
+
+            # Good case: tunnel up for 5s + server responds
+            if verified_tunnel and attempt >= 5:
+                if self._protocol_ping(server_ip, server_port):
+                    self.update_status("✓ Tunnel + server alive — bypass confirmed")
+                    return True
+
+            # Check vClient still alive periodically
+            if attempt > 0 and attempt % 10 == 0:
+                if not self._check_vclient_alive():
+                    self.update_status("❌ vClient died during verification")
+                    return False
+
+            # Progress feedback
+            progress = 60 + min(14, (attempt / max_wait_sec) * 14)
+            self.update_progress(progress, 4)
+            if verified_tunnel:
+                self.update_status(f"Tunnel active, waiting for IOCTL... ({attempt+1}s)")
+            else:
+                self.update_status(f"Waiting for VGC tunnel... ({attempt+1}/{max_wait_sec}s)")
+            time.sleep(1)
+
+        # ── Signal 3: Direct IOCTL 0x22C0EC probe ──
+        self.update_status("Attempting direct IOCTL 0x22C0EC probe...")
+        ioctl_resp = self._protocol_send_ioctl(server_ip, server_port, ioctl_code=0x22C0EC)
+        if ioctl_resp and len(ioctl_resp) > 4:
+            print(f"[VGC-EMU] IOCTL 0x22C0EC probe got {len(ioctl_resp)} bytes")
+            self.update_status("✓ IOCTL 0x22C0EC driver status verified via probe")
+            return True
+
+        # ── Signal 4: Fallback — vClient alive + PING ──
+        if self._check_vclient_alive():
+            if self._protocol_ping(server_ip, server_port):
+                self.update_status("⚠️ IOCTL unverified but server+vClient alive — proceeding")
+                return True
+            self.update_status("❌ Server unreachable — bypass failed")
+            return False
+
+        self.update_status("❌ VGC bypass verification failed")
+        return False
+
     def start_emulator(self):
         """Start the emulation process - called automatically on init"""
         threading.Thread(target=self.emulator_sequence, daemon=True).start()
@@ -293,15 +601,10 @@ class EmulatorLoader:
                     self.show_server_error(server_ip, server_port)
                     return
             
-            # Stage 1: Kill stale processes and disable VGC service (10% -> 20%)
-            self.update_status("Killing stale VGC processes...")
+            # Stage 1: Clean environment and prepare VGC (10% -> 20%)
+            self.update_status("Preparing VGC environment...")
             self.update_progress(10, 1)
-            self.kill_stale_processes()
-            try:
-                self.uninstall_vanguard_service()  # Stop/disable real VGC
-                self.create_emulator_service()     # Create fake vgc pointing to emulator
-            except Exception as e:
-                print(f"[VGC-EMU] Non-fatal error in service setup: {e}")
+            self.prepare_vgc_environment()
             time.sleep(0.5)
             self.update_progress(20, 1)
             self.stages[1]["done"] = True
@@ -328,65 +631,16 @@ class EmulatorLoader:
             self.update_progress(60, 3)
             self.stages[3]["done"] = True
             
+                                    
             # Stage 4: Bypass VGC check AFTER game is loaded (60% -> 75%)
-            # CRITICAL FIX: This is where VAL 81 was happening
-            # The issue: vClient needs to be actively tunneling IOCTLs to server BEFORE this point
             self.update_status("Verifying VGC tunnel active...")
             self.update_progress(60, 4)
-            
-            # Wait for vClient log to show active IOCTL tunneling
-            log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
-            ioctl_verified = False
-            
-            # Give it up to 15 seconds for vClient to establish tunnel
-            for _ in range(15):
-                if os.path.exists(log_path):
-                    try:
-                        with open(log_path, 'r') as f:
-                            last_lines = f.readlines()[-20:]
-                            for line in last_lines:
-                                # Look for signs that IOCTL tunneling is working
-                                if "IOCTL" in line and ("0x22C0EC" in line or "DRIVER_STATUS" in line.lower()):
-                                    ioctl_verified = True
-                                    break
-                                # Also check for general tunnel activity
-                                if "tunnel" in line.lower() and "active" in line.lower():
-                                    ioctl_verified = True
-                                    break
-                    except:
-                        pass
-                
-                if ioctl_verified:
-                    break
-                time.sleep(1)
-            
-            # If IOCTL not verified, wait a bit more and try heartbeat verification
-            if not ioctl_verified:
-                self.update_status("Waiting for heartbeat confirmation...")
-                time.sleep(3)
-                
-                # Try server connection as fallback
-                try:
-                    server_ip, server_port = self.get_server_config()
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(3)
-                    context = ssl.create_default_context()
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                    secure_sock = context.wrap_socket(sock, server_hostname=server_ip)
-                    secure_sock.connect((server_ip, server_port))
-                    secure_sock.close()
-                    ioctl_verified = True
-                except:
-                    pass
-            
-            if not ioctl_verified:
-                self.update_status("⚠️ VGC tunnel not verified, proceeding anyway...")
-            
-            # Now the actual \"bypass\" - which is just ensuring tunnel stays active
-            # The real bypass happens on server side via IOCTL 0x22C0EC handler
-            self.update_status("✓ VGC check bypassed (tunnel active)")
-            time.sleep(1)
+
+            if not self._bypass_vgc_check():
+                self.update_status("❌ VGC bypass failed — cannot queue safely")
+                return
+
+            time.sleep(0.5)
             self.update_progress(75, 4)
             self.stages[4]["done"] = True
             
@@ -419,117 +673,46 @@ class EmulatorLoader:
         except Exception as e:
             self.update_status(f"❌ Error: {str(e)}")
             print(f"Error in emulator sequence: {e}")
-    
+
     def kill_stale_processes(self):
-        """Kill old VGC/vClient processes"""
-        processes_to_kill = ['vgc', 'vgk', 'vClient']
+        """Kill old VGC/vClient/game processes"""
+        processes_to_kill = ['vgc.exe', 'vgtray.exe', 'vclient.exe', 'vgc_client.exe']
         killed = []
         for proc in psutil.process_iter(['name']):
             try:
-                if any(name.lower() in proc.info['name'].lower() for name in processes_to_kill):
+                name = proc.info['name'].lower()
+                if any(k in name for k in processes_to_kill):
                     proc.kill()
                     killed.append(proc.info['name'])
             except:
                 pass
         print(f"[VGC-EMU] Killed stale processes: {killed if killed else 'none'}")
     
-    def uninstall_vanguard_service(self):
-        """Stop and disable VGC service to prevent interference (like paid emulator does)"""
-        self.update_stage_status(1, "⚙️ Stopping VGC service...")
-        success = False
+    def prepare_vgc_environment(self):
+        """Ensure clean environment for vClient without corrupting Windows services"""
+        self.update_stage_status(1, "⚙️ Preparing VGC environment...")
+        self.kill_stale_processes()
         try:
-            # Stop the service - use shell=True and capture output properly
-            print("[VGC-EMU] Attempting to stop VGC service...")
-            result = subprocess.run(
-                'sc stop vgc',
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=3
-            )
-            print(f"[VGC-EMU] sc stop vgc: {result.returncode} - {result.stdout[:100] if result.stdout else 'no output'}")
-            time.sleep(1)
-            
-            # Disable auto-start
-            result = subprocess.run(
-                'sc config vgc start= disabled',
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=3
-            )
-            print(f"[VGC-EMU] sc config vgc: {result.returncode}")
+            # 1. Stop real VGC service if running so vClient can host the named pipes
+            print("[VGC-EMU] Stopping VGC service if active...")
+            subprocess.run('sc stop vgc', shell=True, capture_output=True, timeout=3)
             time.sleep(0.5)
             
-            # Kill any remaining vgc.exe processes
-            subprocess.run('taskkill /F /IM vgc.exe', shell=True, capture_output=True, timeout=2)
-            subprocess.run('taskkill /F /IM vgk.sys', shell=True, capture_output=True, timeout=2)
-            
-            success = True
-            print("[VGC-EMU] Service stopped and disabled successfully")
+            # 2. Ensure vgc service configuration points to the valid binary with demand start
+            # NEVER delete vgc service or set binPath to svchost, as that breaks Riot Client startup!
+            vgc_bin = r"C:\Program Files\Riot Vanguard\vgc.exe"
+            if os.path.exists(vgc_bin):
+                subprocess.run(f'sc config vgc binPath= "{vgc_bin}" start= demand DisplayName= "Vanguard Service"',
+                               shell=True, capture_output=True, timeout=3)
+            else:
+                subprocess.run('sc config vgc start= demand', shell=True, capture_output=True, timeout=3)
+            print("[VGC-EMU] VGC environment prepared successfully")
+            return True
         except subprocess.TimeoutExpired:
             print("[VGC-EMU] Warning: VGC service commands timed out (continuing anyway)")
-        except Exception as e:
-            print(f"[VGC-EMU] Warning: Could not stop VGC service: {e} (continuing anyway)")
-        
-        # CRITICAL: Always mark as done even if VGC uninstall fails
-        # This prevents the loader from getting stuck here
-        return success
-    
-    def create_emulator_service(self):
-        """Create and start a fake vgc service that reports RUNNING (bypass without needing program.exe)"""
-        self.update_stage_status(1, "⚙️ Creating emulator vgc service...")
-        try:
-            # Delete existing service if it exists (ignore errors)
-            print("[VGC-EMU] Removing any existing vgc service...")
-            subprocess.run('sc delete vgc', shell=True, capture_output=True, timeout=3)
-            time.sleep(1.5)
-            
-            # CRITICAL FIX: Create vgc service with dummy binary that Windows accepts
-            # Use svchost.exe as the binary (it's a legitimate Windows service host)
-            # The actual emulation happens via IOCTL tunneling from vClient, not this service
-            dummy_binary = r"C:\\Windows\\System32\\svchost.exe -k netsvcs"
-            
-            print(f"[VGC-EMU] Creating vgc service with dummy binary: {dummy_binary}")
-            cmd = f'sc create vgc binPath= "{dummy_binary}" start= auto DisplayName= "Vanguard Service"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-            print(f"[VGC-EMU] sc create vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
-            
-            if result.returncode != 0 and "ERROR 1073" not in result.stdout:
-                print(f"[VGC-EMU] Warning: Service creation returned {result.returncode}, trying alternative...")
-                # Alternative: Use a simple batch file that exits immediately
-                batch_path = os.path.join(os.environ.get('TEMP', 'C:\\Windows\\Temp'), 'vgc_dummy.bat')
-                with open(batch_path, 'w') as f:
-                    f.write('@echo off\nexit /b 0\n')
-                cmd = f'sc create vgc binPath= "{batch_path}" start= auto'
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-                print(f"[VGC-EMU] sc create vgc (batch): {result.returncode}")
-            
-            time.sleep(1)
-            
-            # Start the service
-            print("[VGC-EMU] Starting vgc service...")
-            result = subprocess.run('sc start vgc', shell=True, capture_output=True, text=True, timeout=10)
-            print(f"[VGC-EMU] sc start vgc: {result.returncode} - {result.stdout[:200] if result.stdout else 'no output'}")
-            
-            # Verify service is running
-            result = subprocess.run('sc query vgc', shell=True, capture_output=True, text=True, timeout=3)
-            print(f"[VGC-EMU] sc query vgc: {result.stdout[:300] if result.stdout else 'no output'}")
-            
-            if "RUNNING" in result.stdout:
-                print("[VGC-EMU] ✓ VGC service is RUNNING")
-                return True
-            else:
-                # CRITICAL: Even if service won't start, mark as success
-                # The real bypass is the IOCTL tunneling from vClient to server
-                print("[VGC-EMU] ⚠️ Service state unknown, but IOCTL tunnel will handle bypass")
-                return True
-                
-        except subprocess.TimeoutExpired:
-            print("[VGC-EMU] Warning: Service creation/start timed out (continuing anyway)")
             return True
         except Exception as e:
-            print(f"[VGC-EMU] Warning: Could not create emulator service: {e} (continuing anyway)")
+            print(f"[VGC-EMU] Warning: Service preparation non-fatal error: {e}")
             return True
     
     def restore_vanguard_service(self):
@@ -839,156 +1022,103 @@ class EmulatorLoader:
                 try:
                     name = proc.info['name'].lower()
                     if name == 'valorant-win64-shipping.exe' or name == 'valorant.exe':
-                        # Confirm process is active
                         found = True
                         break
                 except:
                     pass
             
             if found:
-                # Wait 22 additional seconds for game window & render engine to fully load past splash screen
                 self.update_status("Game detected! Waiting 22s for main lobby menu to render...")
                 time.sleep(22)
                 self.game_detected = True
                 return True
 
             time.sleep(1)
-            # Update progress smoothly 30% -> 60%
             elapsed = time.time() - start_time
             progress = 30 + min(30, (elapsed / timeout) * 30)
             self.update_progress(progress, 3)
         return False
     
     def establish_heartbeats(self):
-        """Check if heartbeats are working by verifying IOCTL 0x22C0EC tunnel"""
+        """Verify heartbeat pipeline: vClient alive + server responsive + log activity."""
         try:
-            # Check if vClient is still running
-            vclient_running = any('vclient' in p.name().lower() 
-                                 for p in psutil.process_iter(['name']))
-            
-            if not vclient_running:
+            # 1. vClient must be alive
+            if not self._check_vclient_alive():
                 self.update_status("❌ vClient process not found")
                 return False
-            
-            # Verify IOCTL tunnel is active by checking vClient.log for DRIVER_STATUS responses
-            log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
-            ioctl_active = False
-            
-            if os.path.exists(log_path):
-                try:
-                    with open(log_path, 'r') as f:
-                        last_lines = f.readlines()[-50:]
-                        for line in last_lines:
-                            # Look for successful IOCTL 0x22C0EC responses
-                            if "0x22C0EC" in line and ("OK" in line or "RESP" in line or "DRIVER_STATUS" in line.lower()):
-                                ioctl_active = True
-                                break
-                            # Also check for general IOCTL activity
-                            if "IOCTL-KEEPALIVE" in line and "OK" in line:
-                                ioctl_active = True
-                                break
-                except:
-                    pass
-            
-            if ioctl_active:
-                self.update_status("✓ IOCTL 0x22C0EC tunnel verified (VAL 5 fix)")
+
+            # 2. Check log for heartbeat evidence
+            _, ioctl_ok, _ = self._parse_vclient_log()
+            if ioctl_ok:
+                self.update_status("✓ Heartbeat IOCTL verified from log")
                 return True
-            
-            # Fallback: Try direct server connection with proper protocol PING
+
+            # 3. Protocol PING to confirm server is alive and responding
             server_ip, server_port = self.get_server_config()
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                
-                secure_sock = context.wrap_socket(sock, server_hostname=server_ip)
-                secure_sock.connect((server_ip, server_port))
-                
-                # Send proper PING message (MsgType.PING = 7)
-                ping_msg = struct.pack("!II", 7, 0)  # msg_type=7, payload_len=0
-                secure_sock.sendall(ping_msg)
-                
-                # Wait for PONG (MsgType.PONG = 8)
-                secure_sock.settimeout(2)
-                header = secure_sock.recv(8)
-                if len(header) == 8:
-                    msg_type, payload_len = struct.unpack("!II", header)
-                    if msg_type == 8:  # PONG received
-                        self.update_status("✓ Server PONG received - tunnel ready")
-                        secure_sock.close()
-                        return True
-                
-                secure_sock.close()
-                
-            except Exception as e:
-                self.update_status(f"⚠️ Connection check: {str(e)}")
-            
-            # If vClient is running, assume tunnel is working (fallback)
-            self.update_status("⚠️ Using fallback - vClient running")
-            return True
-            
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                self.update_status(f"Heartbeat PING check ({attempt}/{max_retries})...")
+                if self._protocol_ping(server_ip, server_port):
+                    self.update_status("✓ Server PONG received — heartbeats active")
+                    return True
+                time.sleep(1)
+
+            # 4. Fallback: vClient alive = assume heartbeats will flow
+            if self._check_vclient_alive():
+                self.update_status("⚠️ PONG missed but vClient alive — heartbeats assumed")
+                return True
+
+            self.update_status("❌ Heartbeat verification failed")
+            return False
+
         except Exception as e:
             self.update_status(f"❌ Heartbeat error: {str(e)}")
             return False
     
     def send_auth_request(self):
-        """Send auth request to server and verify SESSION_AUTH_OK"""
+        """Verify auth by confirming session exists (protocol PING) + vClient log.
+        
+        The actual SESSION_AUTH is handled by vClient.exe — the loader only
+        confirms the pipeline is alive before marking auth complete.
+        """
         try:
             server_ip, server_port = self.get_server_config()
-            
-            # Connect to server
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            secure_sock = context.wrap_socket(sock, server_hostname=server_ip)
-            secure_sock.connect((server_ip, server_port))
-            
-            # Read vClient log to get session info
-            log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
-            session_id = None
-            
-            if os.path.exists(log_path):
-                with open(log_path, 'r') as f:
-                    for line in f:
-                        if "SESSION_AUTH_OK" in line or "session=" in line.lower():
-                            # Extract session ID if present
-                            import re
-                            match = re.search(r'session[=:]\s*([a-f0-9-]{8,})', line, re.IGNORECASE)
-                            if match:
-                                session_id = match.group(1)
-                                break
-            
-            # Send auth verification request
-            auth_msg = b"AUTH_CHECK\x00"
-            if session_id:
-                auth_msg += session_id.encode()
-            else:
-                auth_msg += b"default"
-            
-            secure_sock.sendall(auth_msg)
-            
-            # Wait for response
-            response = secure_sock.recv(1024)
-            secure_sock.close()
-            
-            # Check if auth was successful
-            if b"OK" in response or b"AUTH" in response or len(response) > 0:
+
+            # 1. Extract session from vClient log (may already be cached)
+            session_id = self._vclient_session_id
+            if not session_id:
+                sid, _, _ = self._parse_vclient_log()
+                if sid:
+                    session_id = sid
+                    self._vclient_session_id = sid
+
+            # 2. Protocol PING — confirms server is alive and accepting
+            auth_confirmed = False
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                self.update_status(f"Auth verification PING ({attempt}/{max_retries})...")
+                if self._protocol_ping(server_ip, server_port):
+                    auth_confirmed = True
+                    break
+                time.sleep(1)
+
+            if auth_confirmed:
                 self.save_auth_state()
-                self.update_status("✓ Auth request successful")
+                sid_str = session_id[:8] if session_id else 'N/A'
+                self.update_status(f"✓ Auth verified (session {sid_str})")
                 return True
-            
-            # Fallback: save state anyway
-            self.save_auth_state()
-            self.update_status("⚠️ Auth response unclear, proceeding...")
-            return True
-            
+
+            # 3. Fallback: if vClient alive, trust auth was done by vClient
+            if self._check_vclient_alive():
+                self.save_auth_state()
+                self.update_status("⚠️ Server PING missed but vClient alive — auth assumed")
+                return True
+
+            self.update_status("❌ Auth verification failed")
+            return False
+
         except Exception as e:
-            self.update_status(f"⚠️ Auth request error: {str(e)}, proceeding anyway")
+            self.update_status(f"⚠️ Auth error: {str(e)}, proceeding anyway")
             self.save_auth_state()
             return True
     

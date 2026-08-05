@@ -258,6 +258,24 @@ def build_gateway_auth_response(session_id: str, region: str) -> bytes:
     return json.dumps(response).encode('utf-8')
 
 
+def _encode_varint_bytes(value: int) -> bytes:
+    buf = bytearray()
+    while value > 0x7F:
+        buf.append((value & 0x7F) | 0x80)
+        value >>= 7
+    buf.append(value & 0x7F)
+    return bytes(buf)
+
+
+def _encode_proto_field(field_num: int, wire_type: int, data: bytes) -> bytes:
+    tag = (field_num << 3) | wire_type
+    result = bytearray(_encode_varint_bytes(tag))
+    if wire_type == 2:  # length-delimited
+        result.extend(_encode_varint_bytes(len(data)))
+    result.extend(data)
+    return bytes(result)
+
+
 def build_gateway_envelope(
     session_id: str = "",
     hwid_hex: str = "",
@@ -267,8 +285,59 @@ def build_gateway_envelope(
     rsa_spki_pem: bytes = b"",
     timestamp_ms: int = 0,
 ) -> bytes:
-    """Build gateway envelope for session auth handshake response"""
-    return build_gateway_auth_response(session_id, region)
+    """Build dynamic protobuf gateway envelope with F1, F15, OSInfo, and client info"""
+    from .vgc_tokens import build_f1_token, build_f15_token
+
+    if timestamp_ms == 0:
+        timestamp_ms = int(time.time() * 1000)
+
+    try:
+        hwid_bytes = bytes.fromhex(hwid_hex) if hwid_hex and len(hwid_hex) >= 2 else (hwid_hex.encode() if hwid_hex else b'\x00' * 32)
+    except ValueError:
+        hwid_bytes = hwid_hex.encode() if hwid_hex else b'\x00' * 32
+
+    # 1. Build F1 token
+    f1_token = build_f1_token(puuid, hwid_bytes, timestamp_ms)
+
+    # 2. Build F15 token
+    if build_info:
+        client_ver = f"{build_info.get('major', 1)}.{build_info.get('minor', 18)}.{build_info.get('patch', 4)}.47"
+    else:
+        client_ver = "1.18.4.47"
+    f15_token = build_f15_token(f1_token, client_ver)
+
+    envelope = bytearray()
+
+    # Field 1: version (varint) - 1
+    envelope.extend(_encode_proto_field(1, 0, _encode_varint_bytes(1)))
+
+    # Field 2: signed_token / F1 token (bytes)
+    envelope.extend(_encode_proto_field(2, 2, f1_token))
+
+    # Field 3: client_info (bytes / sub-message)
+    client_info = bytearray()
+    client_info.extend(_encode_proto_field(1, 2, puuid.encode('utf-8') if puuid else b''))
+    client_info.extend(_encode_proto_field(2, 2, region.encode('utf-8') if region else b'la'))
+    client_info.extend(_encode_proto_field(3, 2, client_ver.encode('utf-8')))
+    if rsa_spki_pem:
+        client_info.extend(_encode_proto_field(4, 2, rsa_spki_pem))
+    envelope.extend(_encode_proto_field(3, 2, bytes(client_info)))
+
+    # Field 4: timestamp (fixed64)
+    envelope.extend(_encode_proto_field(4, 1, struct.pack("<Q", timestamp_ms)))
+
+    # Field 5: OS Info (sub-message, VAL 5 fix)
+    os_info = bytearray()
+    os_info.extend(_encode_proto_field(1, 0, _encode_varint_bytes(1)))  # platform: 1=Windows
+    os_info.extend(_encode_proto_field(2, 0, _encode_varint_bytes(2)))  # architecture: 2=x64
+    os_info.extend(_encode_proto_field(3, 2, b'10.0.19045'))             # version: 10.0.19045
+    os_info.extend(_encode_proto_field(4, 0, _encode_varint_bytes(1)))  # variant: 1=Pro
+    envelope.extend(_encode_proto_field(5, 2, bytes(os_info)))
+
+    # Field 15: F15 Token (string/bytes)
+    envelope.extend(_encode_proto_field(15, 2, f15_token.encode('utf-8')))
+
+    return bytes(envelope)
 
 
 def start_keepalive_loop(session_id: str, tokens: GatewayTokens, interval_sec: int = 2700) -> threading.Thread:
