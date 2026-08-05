@@ -675,13 +675,27 @@ class EmulatorLoader:
             print(f"Error in emulator sequence: {e}")
 
     def kill_stale_processes(self):
-        """Kill old VGC/vClient/game processes"""
+        """Kill old VGC/vClient/game processes (preserves active vClient if Valorant is running)"""
+        val_running = False
+        for proc in psutil.process_iter(['name']):
+            try:
+                name = (proc.info['name'] or '').lower()
+                if name == 'valorant-win64-shipping.exe':
+                    val_running = True
+                    break
+            except:
+                pass
+
+        if val_running:
+            print("[VGC-EMU] Valorant is already active — preserving running vClient...")
+            return
+
         processes_to_kill = ['vgc.exe', 'vgtray.exe', 'vclient.exe', 'vgc_client.exe']
         killed = []
         for proc in psutil.process_iter(['name']):
             try:
-                name = proc.info['name'].lower()
-                if any(k in name for k in processes_to_kill):
+                name = (proc.info['name'] or '').lower()
+                if any(k == name for k in processes_to_kill):
                     proc.kill()
                     killed.append(proc.info['name'])
             except:
@@ -958,8 +972,18 @@ class EmulatorLoader:
             print(f"Config not found: {config_path}")
     
     def start_vclient(self):
-        """Start vClient.exe"""
+        """Start vClient.exe if not already running"""
         try:
+            for proc in psutil.process_iter(['name']):
+                try:
+                    name = (proc.info['name'] or '').lower()
+                    if name in ['vclient.exe', 'vclient']:
+                        print("[VGC-EMU] vClient is already running.")
+                        self.vclient_running = True
+                        return True
+                except:
+                    pass
+
             vclient_path = os.path.join(os.path.dirname(__file__), "build", "vClient.exe")
             if not os.path.exists(vclient_path):
                 vclient_path = os.path.join(os.path.dirname(__file__), "vClient.exe")

@@ -1018,6 +1018,7 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
         // vgc.exe calls this when queueing to verify vgk.sys is loaded
         // Send every 10 seconds to keep tunnel active and prevent VAL 81
         uint32_t ioctl_counter = 0;
+        int fail_streak = 0;
         while (!g_shutdown.load()) {
             Sleep(10000);
             try {
@@ -1032,12 +1033,26 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
                     uint32_t resp_type = ReadU32BE(resp.data());
                     if (resp_type == MSG_IOCTL_RESP) {
                         ioctl_counter++;
+                        fail_streak = 0;
                         Log("[IOCTL-KEEPALIVE] DRIVER_STATUS OK counter=" + std::to_string(ioctl_counter));
                     }
                 }
+            } catch (const std::exception& e) {
+                fail_streak++;
+                Log("[IOCTL-KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/5): " + std::string(e.what()));
+                if (fail_streak >= 5) {
+                    Log("[IOCTL-KEEPALIVE] Max consecutive failures reached, ending keepalive");
+                    break;
+                }
+                Sleep(2000);
             } catch (...) {
-                Log("[IOCTL-KEEPALIVE] Failed, breaking loop");
-                break;
+                fail_streak++;
+                Log("[IOCTL-KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/5): transient error");
+                if (fail_streak >= 5) {
+                    Log("[IOCTL-KEEPALIVE] Max consecutive failures reached, ending keepalive");
+                    break;
+                }
+                Sleep(2000);
             }
         }
         tls.Close();
