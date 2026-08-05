@@ -67,19 +67,25 @@ if "%VALORANT_PATH%"=="" (
 echo [4/6] Valorant encontrado en: %VALORANT_PATH%. OK.
 echo.
 :: [5/6] Copiar vClient.exe a carpeta de Valorant
+set VCLIENT_SRC=vClient.exe
 if not exist "vClient.exe" (
-    echo [ERROR] vClient.exe no encontrado en el directorio actual.
-    echo Asegúrate de ejecutar este script desde la carpeta del emulador.
-    pause
-    exit /b 1
+    if exist "vClient_new.exe" (
+        set VCLIENT_SRC=vClient_new.exe
+    ) else (
+        echo [ERROR] vClient.exe no encontrado en el directorio actual.
+        echo Asegúrate de ejecutar este script desde la carpeta del emulador.
+        pause
+        exit /b 1
+    )
 )
-copy /Y "vClient.exe" "%VALORANT_PATH%\vClient.exe" >nul
+copy /Y "%VCLIENT_SRC%" "%VALORANT_PATH%\vClient.exe" >nul
 if %errorLevel% neq 0 (
-    echo [ERROR] No se pudo copiar vClient.exe a %VALORANT_PATH%
+    echo [ERROR] No se pudo copiar %VCLIENT_SRC% a %VALORANT_PATH%
     pause
     exit /b 1
 )
-echo [5/6] vClient.exe copiado a %VALORANT_PATH%. OK.
+echo [5/6] %VCLIENT_SRC% copiado a %VALORANT_PATH%\vClient.exe. OK.
+
 echo.
 :: [6/6] Crear launcher automático start_emulator.bat
 (
