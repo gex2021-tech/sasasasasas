@@ -698,14 +698,19 @@ class EmulatorLoader:
             subprocess.run('sc stop vgc', shell=True, capture_output=True, timeout=3)
             time.sleep(0.5)
             
-            # 2. Ensure vgc service configuration points to the valid binary with demand start
-            # NEVER delete vgc service or set binPath to svchost, as that breaks Riot Client startup!
+            # 2. Ensure vgc service exists and points to the legitimate binary with demand start
             vgc_bin = r"C:\Program Files\Riot Vanguard\vgc.exe"
-            if os.path.exists(vgc_bin):
-                subprocess.run(f'sc config vgc binPath= "{vgc_bin}" start= demand DisplayName= "Vanguard Service"',
+            query_res = subprocess.run('sc query vgc', shell=True, capture_output=True, text=True, timeout=3)
+            if "1060" in query_res.stdout or "1060" in query_res.stderr or query_res.returncode != 0:
+                print("[VGC-EMU] Service vgc not found, registering legitimate Vanguard service...")
+                subprocess.run(f'sc create vgc binPath= "{vgc_bin}" start= demand DisplayName= "Vanguard Service"',
                                shell=True, capture_output=True, timeout=3)
             else:
-                subprocess.run('sc config vgc start= demand', shell=True, capture_output=True, timeout=3)
+                if os.path.exists(vgc_bin):
+                    subprocess.run(f'sc config vgc binPath= "{vgc_bin}" start= demand DisplayName= "Vanguard Service"',
+                                   shell=True, capture_output=True, timeout=3)
+                else:
+                    subprocess.run('sc config vgc start= demand', shell=True, capture_output=True, timeout=3)
             print("[VGC-EMU] VGC environment prepared successfully")
             return True
         except subprocess.TimeoutExpired:

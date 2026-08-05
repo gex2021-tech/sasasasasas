@@ -1,12 +1,16 @@
-# Script to restore legitimate VGC service configuration and unfreeze Riot Client
-try {
-    Stop-Process -Id 2852 -Force -ErrorAction SilentlyContinue
-} catch {}
+# Script to create/restore legitimate VGC service configuration
+$vgcPath = "C:\Program Files\Riot Vanguard\vgc.exe"
 
-try {
-    Get-Process -Name vgc, svchost, RiotClientServices, VALORANT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*vgc*" -or $_.CommandLine -like "*netsvcs*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-} catch {}
+# Check if vgc exists or create it
+$service = Get-Service -Name vgc -ErrorAction SilentlyContinue
 
-# Reconfigure vgc service
-& sc.exe config vgc binPath= "C:\Program Files\Riot Vanguard\vgc.exe" start= demand DisplayName= "Vanguard Service"
-Write-Host "vgc service reconfigured to legitimate Vanguard binary"
+if (-not $service) {
+    Write-Host "[*] Creating vgc service..."
+    & sc.exe create vgc binPath= "`"$vgcPath`"" start= demand DisplayName= "Vanguard Service"
+} else {
+    Write-Host "[*] Reconfiguring existing vgc service..."
+    & sc.exe config vgc binPath= "`"$vgcPath`"" start= demand DisplayName= "Vanguard Service"
+}
+
+# Verify service status
+& sc.exe query vgc
