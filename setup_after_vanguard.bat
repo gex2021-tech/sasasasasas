@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 :: ============================================
 :: VGC Emulator - Setup After Vanguard Install
 :: ============================================
