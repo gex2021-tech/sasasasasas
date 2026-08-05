@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from .protobuf_util import encode_field, encode_varint
+
 log = logging.getLogger("vgc_driver")
 
 # IOCTL codes from vgk.sys
@@ -101,7 +103,7 @@ class VGCDriver:
         response = bytearray()
         
         # Version = 1
-        response.extend(self._encode_protobuf_field(1, 0, b'\x01'))
+        response.extend(encode_field(1, 0, b'\x01'))
         
         # Status = 0 (clean)
         status = 0
@@ -109,38 +111,38 @@ class VGCDriver:
             status = 1  # suspicious
         if state.integrity_failures > 10:
             status = 2  # detected
-        response.extend(self._encode_protobuf_field(2, 0, bytes([status])))
+        response.extend(encode_field(2, 0, bytes([status])))
         
         # Timestamp
         ts = int(time.time() * 1000)
-        response.extend(self._encode_protobuf_field(3, 1, struct.pack("<Q", ts)))
+        response.extend(encode_field(3, 1, struct.pack("<Q", ts)))
         
         # Scan count
-        response.extend(self._encode_protobuf_field(4, 0, self._encode_varint(state.scan_count)))
+        response.extend(encode_field(4, 0, encode_varint(state.scan_count)))
         
         # Generate HMAC signature
         sig_data = bytes(response)
         signature = hmac.new(key, sig_data, hashlib.sha256).digest()
-        response.extend(self._encode_protobuf_field(5, 2, signature))
+        response.extend(encode_field(5, 2, signature))
         
         # Windows Security Flags (NEW - critical for VAL 5)
         # Bits: 0=HVCI, 1=IOMMU, 2=SecureBoot, 3=VBS, 4=TPM2
         security_flags = 0b11111  # All enabled (0x1F)
-        response.extend(self._encode_protobuf_field(6, 0, self._encode_varint(security_flags)))
+        response.extend(encode_field(6, 0, encode_varint(security_flags)))
         
         # OSInfo embedded message - CRITICAL for VAL 5 prevention
         # Matches paid emulator logs: "Processor|VOL:A" format
         # variant=1 = Windows 10/11 Pro (safe), variant=6 triggers VAL 5
         os_info_msg = bytearray()
-        os_info_msg.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # variant=1 (Pro)
-        os_info_msg.extend(self._encode_protobuf_field(2, 2, b'Windows 11 Pro'))  # OS name
-        os_info_msg.extend(self._encode_protobuf_field(3, 0, self._encode_varint(22000)))  # build number
-        response.extend(self._encode_protobuf_field(7, 2, bytes(os_info_msg)))
+        os_info_msg.extend(encode_field(1, 0, b'\x01'))  # variant=1 (Pro)
+        os_info_msg.extend(encode_field(2, 2, b'Windows 11 Pro'))  # OS name
+        os_info_msg.extend(encode_field(3, 0, encode_varint(22000)))  # build number
+        response.extend(encode_field(7, 2, bytes(os_info_msg)))
         
         # Add noise to prevent static detection
         import os
         noise_bytes = os.urandom(random.randint(8, 32))
-        response.extend(self._encode_protobuf_field(99, 2, noise_bytes))
+        response.extend(encode_field(99, 2, noise_bytes))
         
         log.debug(
             "heartbeat session=%s scan=%d status=%d len=%d flags=0x%X osinfo_variant=1",
@@ -172,22 +174,22 @@ class VGCDriver:
         response = bytearray()
         
         # Field 1: check_type (varint)
-        response.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # Full check
+        response.extend(encode_field(1, 0, b'\x01'))  # Full check
         
         # Field 2: result (varint) - 0=pass, 1=suspicious, 2=fail
         result = 0
         if random.random() < 0.01:  # 1% chance of "suspicious"
             result = 1
             state.integrity_failures += 1
-        response.extend(self._encode_protobuf_field(2, 0, bytes([result])))
+        response.extend(encode_field(2, 0, bytes([result])))
         
         # Field 3: regions_checked (varint)
         regions = random.randint(50, 150)
-        response.extend(self._encode_protobuf_field(3, 0, self._encode_varint(regions)))
+        response.extend(encode_field(3, 0, encode_varint(regions)))
         
         # Field 4: hash (bytes) - SHA256 of "clean" state
         clean_hash = hashlib.sha256(b"VALORANT_CLEAN_STATE").digest()
-        response.extend(self._encode_protobuf_field(4, 2, clean_hash))
+        response.extend(encode_field(4, 2, clean_hash))
         
         log.debug(
             "integrity session=%s result=%d regions=%d",
@@ -213,15 +215,15 @@ class VGCDriver:
         # HMAC(key, challenge || session_id || timestamp)
         attest_data = challenge + state.session_id.encode() + struct.pack("<d", time.time())
         attest_sig = hmac.new(key, attest_data, hashlib.sha256).digest()
-        response.extend(self._encode_protobuf_field(1, 2, attest_sig))
+        response.extend(encode_field(1, 2, attest_sig))
         
         # Field 2: boot_id (varint) - unique per boot
         boot_id = int(state.boot_time * 1000) & 0xFFFFFFFF
-        response.extend(self._encode_protobuf_field(2, 0, self._encode_varint(boot_id)))
+        response.extend(encode_field(2, 0, encode_varint(boot_id)))
         
         # Field 3: driver_version (string)
         version = b"vgk.sys 1.18.3-74+20260623.212037"
-        response.extend(self._encode_protobuf_field(3, 2, version))
+        response.extend(encode_field(3, 2, version))
         
         log.debug(
             "attestation session=%s nonce=%s",
@@ -240,19 +242,19 @@ class VGCDriver:
         
         # Field 1: scan_type (varint) - 1=quick, 2=deep
         scan_type = 1 if len(data) < 16 else 2
-        response.extend(self._encode_protobuf_field(1, 0, bytes([scan_type])))
+        response.extend(encode_field(1, 0, bytes([scan_type])))
         
         # Field 2: regions_scanned (varint)
         regions = random.randint(100, 500) if scan_type == 2 else random.randint(20, 50)
-        response.extend(self._encode_protobuf_field(2, 0, self._encode_varint(regions)))
+        response.extend(encode_field(2, 0, encode_varint(regions)))
         
         # Field 3: anomalies_found (varint)
         anomalies = 0  # Always clean
-        response.extend(self._encode_protobuf_field(3, 0, bytes([anomalies])))
+        response.extend(encode_field(3, 0, bytes([anomalies])))
         
         # Field 4: scan_duration_ms (varint)
         duration = random.randint(50, 200)
-        response.extend(self._encode_protobuf_field(4, 0, self._encode_varint(duration)))
+        response.extend(encode_field(4, 0, encode_varint(duration)))
         
         log.debug(
             "memory_scan session=%s type=%d regions=%d",
@@ -269,11 +271,11 @@ class VGCDriver:
         
         # Field 1: modules_checked (varint)
         modules = random.randint(30, 80)
-        response.extend(self._encode_protobuf_field(1, 0, self._encode_varint(modules)))
+        response.extend(encode_field(1, 0, encode_varint(modules)))
         
         # Field 2: suspicious_count (varint)
         suspicious = len(state.suspicious_modules)
-        response.extend(self._encode_protobuf_field(2, 0, bytes([suspicious])))
+        response.extend(encode_field(2, 0, bytes([suspicious])))
         
         # Field 3: result (varint) - 0=pass, 1=suspicious, 2=detected
         result = 0
@@ -281,7 +283,7 @@ class VGCDriver:
             result = 1
         if suspicious > 5:
             result = 2
-        response.extend(self._encode_protobuf_field(3, 0, bytes([result])))
+        response.extend(encode_field(3, 0, bytes([result])))
         
         log.debug(
             "module_check session=%s modules=%d suspicious=%d",
@@ -301,23 +303,23 @@ class VGCDriver:
         response = bytearray()
         
         # Field 1: driver_loaded (varint) - 1=loaded
-        response.extend(self._encode_protobuf_field(1, 0, b'\x01'))
+        response.extend(encode_field(1, 0, b'\x01'))
         
         # Field 2: driver_version (string)
         driver_ver = b"vgk.sys 1.18.3-74+20260623.212037"
-        response.extend(self._encode_protobuf_field(2, 2, driver_ver))
+        response.extend(encode_field(2, 2, driver_ver))
         
         # Field 3: boot_time (fixed64)
         boot_ms = int(state.boot_time * 1000)
-        response.extend(self._encode_protobuf_field(3, 1, struct.pack("<Q", boot_ms)))
+        response.extend(encode_field(3, 1, struct.pack("<Q", boot_ms)))
         
         # Field 4: protection_enabled (varint) - 1=enabled
-        response.extend(self._encode_protobuf_field(4, 0, b'\x01'))
+        response.extend(encode_field(4, 0, b'\x01'))
         
         # Field 5: windows_security_features (varint)
         # Bits: 0=HVCI, 1=IOMMU, 2=SecureBoot, 3=VBS, 4=TPM2
         sec_features = 0b11111  # All enabled
-        response.extend(self._encode_protobuf_field(5, 0, bytes([sec_features])))
+        response.extend(encode_field(5, 0, bytes([sec_features])))
         
         # Field 6: kernel_integrity_level (varint) - 0-100
         integrity = 100  # Perfect
@@ -325,17 +327,17 @@ class VGCDriver:
         # Field 7: OSInfo embedded message - CRITICAL for VAL 5 prevention
         # variant=1 = Windows 10/11 Pro (safe), variant=6 triggers VAL 5
         os_info_msg = bytearray()
-        os_info_msg.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # variant=1 (Pro)
-        os_info_msg.extend(self._encode_protobuf_field(2, 2, b'Windows 11 Pro'))
-        os_info_msg.extend(self._encode_protobuf_field(3, 0, self._encode_varint(22000)))
-        response.extend(self._encode_protobuf_field(7, 2, bytes(os_info_msg)))
+        os_info_msg.extend(encode_field(1, 0, b'\x01'))  # variant=1 (Pro)
+        os_info_msg.extend(encode_field(2, 2, b'Windows 11 Pro'))
+        os_info_msg.extend(encode_field(3, 0, encode_varint(22000)))
+        response.extend(encode_field(7, 2, bytes(os_info_msg)))
         
-        response.extend(self._encode_protobuf_field(6, 0, bytes([integrity])))
+        response.extend(encode_field(6, 0, bytes([integrity])))
         
         # Field 8: signature (bytes) - HMAC of response
         sig_data = bytes(response)
         signature = hmac.new(key, sig_data, hashlib.sha256).digest()
-        response.extend(self._encode_protobuf_field(8, 2, signature))
+        response.extend(encode_field(8, 2, signature))
         
         log.debug(
             "driver_status session=%s loaded=1 integrity=%d osinfo_variant=1",
@@ -349,41 +351,12 @@ class VGCDriver:
         """Fallback for unknown IOCTL codes"""
         # Return basic success response
         response = bytearray()
-        response.extend(self._encode_protobuf_field(1, 0, b'\x00'))  # status=success
-        response.extend(self._encode_protobuf_field(2, 2, data if data else b'OK'))
+        response.extend(encode_field(1, 0, b'\x00'))  # status=success
+        response.extend(encode_field(2, 2, data if data else b'OK'))
         
         log.debug("generic_ioctl code=0x%X len=%d", ioctl_code, len(data))
         
         return bytes(response)
-    
-    # Protobuf encoding helpers
-    
-    def _encode_varint(self, value: int) -> bytes:
-        """Encode integer as protobuf varint"""
-        buf = bytearray()
-        while value > 0x7F:
-            buf.append((value & 0x7F) | 0x80)
-            value >>= 7
-        buf.append(value & 0x7F)
-        return bytes(buf)
-    
-    def _encode_protobuf_field(self, field_num: int, wire_type: int, data: bytes) -> bytes:
-        """Encode protobuf field: (field_num << 3) | wire_type + data
-        
-        Wire types:
-        0 = varint
-        1 = fixed64
-        2 = length-delimited
-        5 = fixed32
-        """
-        tag = (field_num << 3) | wire_type
-        result = bytearray(self._encode_varint(tag))
-        
-        if wire_type == 2:  # length-delimited
-            result.extend(self._encode_varint(len(data)))
-        
-        result.extend(data)
-        return bytes(result)
 
 
 # Global driver instance

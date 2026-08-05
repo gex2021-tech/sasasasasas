@@ -41,9 +41,16 @@ def unpack_header(data: bytes) -> Tuple[int, int]:
     return HEADER.unpack(data[:HEADER.size])
 
 
+def pack_len_prefixed(data: bytes) -> bytes:
+    return struct.pack("!I", len(data)) + data
+
+
+def pack_len_prefixed_str(value: str) -> bytes:
+    return pack_len_prefixed(value.encode("utf-8"))
+
+
 def pack_hello(auth_key: str, client_hwid: bytes) -> bytes:
-    key = auth_key.encode("utf-8")
-    body = struct.pack("!I", len(key)) + key + struct.pack("!I", len(client_hwid)) + client_hwid
+    body = pack_len_prefixed_str(auth_key) + pack_len_prefixed(client_hwid)
     return pack(MsgType.HELLO, body)
 
 
@@ -59,13 +66,11 @@ def parse_hello(payload: bytes) -> Tuple[str, bytes]:
 
 
 def pack_hello_ok(session_id: str) -> bytes:
-    sid = session_id.encode("utf-8")
-    return pack(MsgType.HELLO_OK, struct.pack("!I", len(sid)) + sid)
+    return pack(MsgType.HELLO_OK, pack_len_prefixed_str(session_id))
 
 
 def pack_sync(session_id: str, last_sequence: int) -> bytes:
-    sid = session_id.encode("utf-8")
-    body = struct.pack("!I", len(sid)) + sid + struct.pack("!Q", last_sequence)
+    body = pack_len_prefixed_str(session_id) + struct.pack("!Q", last_sequence)
     return pack(MsgType.SYNC, body)
 
 
@@ -79,7 +84,7 @@ def parse_sync(payload: bytes) -> Tuple[str, int]:
 
 
 def pack_ioctl(ioctl_code: int, data: bytes) -> bytes:
-    body = struct.pack("!I", ioctl_code) + struct.pack("!I", len(data)) + data
+    body = struct.pack("!I", ioctl_code) + pack_len_prefixed(data)
     return pack(MsgType.IOCTL, body)
 
 
@@ -90,11 +95,11 @@ def parse_ioctl(payload: bytes) -> Tuple[int, bytes]:
 
 
 def pack_ioctl_resp(data: bytes) -> bytes:
-    return pack(MsgType.IOCTL_RESP, struct.pack("!I", len(data)) + data)
+    return pack(MsgType.IOCTL_RESP, pack_len_prefixed(data))
 
 
 def pack_heartbeat_buffer(sequence: int, data: bytes) -> bytes:
-    body = struct.pack("!Q", sequence) + struct.pack("!I", len(data)) + data
+    body = struct.pack("!Q", sequence) + pack_len_prefixed(data)
     return pack(MsgType.HEARTBEAT_BUFFER, body)
 
 
@@ -263,10 +268,34 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
     )
 
 
+def pack_session_auth(
+    auth_key: str,
+    gateway_machine_id: bytes,
+    jwt: str,
+    puuid: str,
+    valorant_pid: int,
+    client_ts_ms: int,
+    region: str = "",
+    hwid_fingerprint: bytes = b"",
+    riot_account: str = "",
+    hostname: str = "",
+) -> bytes:
+    """Build the SESSION_AUTH payload sent by clients (mirrors parse_session_auth)."""
+    payload = pack_len_prefixed_str(auth_key)
+    payload += pack_len_prefixed(gateway_machine_id)
+    payload += pack_len_prefixed_str(jwt)
+    payload += pack_len_prefixed_str(puuid)
+    payload += struct.pack("!I", valorant_pid)
+    payload += struct.pack("!Q", client_ts_ms)
+    payload += pack_len_prefixed_str(region)
+    payload += pack_len_prefixed(hwid_fingerprint)
+    payload += pack_len_prefixed_str(riot_account)
+    payload += pack_len_prefixed_str(hostname)
+    return payload
+
+
 def pack_session_auth_ok(session_id: str, gateway_envelope: bytes = b"") -> bytes:
-    sid = session_id.encode("utf-8")
-    body = struct.pack("!I", len(sid)) + sid
-    body += struct.pack("!I", len(gateway_envelope)) + gateway_envelope
+    body = pack_len_prefixed_str(session_id) + pack_len_prefixed(gateway_envelope)
     return pack(MsgType.SESSION_AUTH_OK, body)
 
 

@@ -10,11 +10,13 @@ import hmac
 import logging
 import struct
 import time
-from typing import Optional, Tuple
+from typing import Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+
+from .protobuf_util import encode_field, encode_varint, read_varint
 
 log = logging.getLogger("heartbeat_tasks")
 
@@ -102,22 +104,22 @@ def parse_tasks(plaintext: bytes) -> list[dict]:
     while offset < len(plaintext):
         try:
             # Read field tag
-            tag, offset = _read_varint(plaintext, offset)
+            tag, offset = read_varint(plaintext, offset)
             field_num = tag >> 3
             wire_type = tag & 0x7
             
             if field_num == 1:  # task_id
-                task_id, offset = _read_varint(plaintext, offset)
+                task_id, offset = read_varint(plaintext, offset)
                 tasks.append({"id": task_id, "type": 0, "data": b""})
             
             elif field_num == 2:  # task_type
-                task_type, offset = _read_varint(plaintext, offset)
+                task_type, offset = read_varint(plaintext, offset)
                 if tasks:
                     tasks[-1]["type"] = task_type
             
             elif field_num == 3:  # task_data
                 if wire_type == 2:  # length-delimited
-                    length, offset = _read_varint(plaintext, offset)
+                    length, offset = read_varint(plaintext, offset)
                     data = plaintext[offset:offset + length]
                     offset += length
                     if tasks:
@@ -126,9 +128,9 @@ def parse_tasks(plaintext: bytes) -> list[dict]:
             else:
                 # Unknown field, skip
                 if wire_type == 0:  # varint
-                    _, offset = _read_varint(plaintext, offset)
+                    _, offset = read_varint(plaintext, offset)
                 elif wire_type == 2:  # length-delimited
-                    length, offset = _read_varint(plaintext, offset)
+                    length, offset = read_varint(plaintext, offset)
                     offset += length
                 else:
                     break
@@ -158,64 +160,26 @@ def build_task_results(tasks: list[dict], session_key: bytes) -> bytes:
     response = bytearray()
     
     # Field 1: task_count
-    response.extend(_encode_protobuf_field(1, 0, _encode_varint(len(tasks))))
+    response.extend(encode_field(1, 0, encode_varint(len(tasks))))
     
     # Field 2: results (repeated)
     for task in tasks:
         result_msg = bytearray()
         
         # Subfield 1: task_id
-        result_msg.extend(_encode_protobuf_field(1, 0, _encode_varint(task["id"])))
+        result_msg.extend(encode_field(1, 0, encode_varint(task["id"])))
         
         # Subfield 2: status (0=success)
-        result_msg.extend(_encode_protobuf_field(2, 0, b'\x00'))
+        result_msg.extend(encode_field(2, 0, b'\x00'))
         
         # Subfield 3: result_data (fake success response)
         result_data = b"OK\x00" + struct.pack("<Q", int(time.time() * 1000))
-        result_msg.extend(_encode_protobuf_field(3, 2, result_data))
+        result_msg.extend(encode_field(3, 2, result_data))
         
-        response.extend(_encode_protobuf_field(2, 2, bytes(result_msg)))
+        response.extend(encode_field(2, 2, bytes(result_msg)))
     
     # Field 3: HMAC signature
     signature = hmac.new(session_key, bytes(response), hashlib.sha256).digest()
-    response.extend(_encode_protobuf_field(3, 2, signature))
+    response.extend(encode_field(3, 2, signature))
     
     return bytes(response)
-
-
-# Protobuf encoding/decoding helpers
-
-def _read_varint(data: bytes, offset: int) -> Tuple[int, int]:
-    """Read varint from bytes at offset, return (value, new_offset)"""
-    value = 0
-    shift = 0
-    while offset < len(data):
-        byte = data[offset]
-        offset += 1
-        value |= (byte & 0x7F) << shift
-        if not (byte & 0x80):
-            break
-        shift += 7
-    return value, offset
-
-
-def _encode_varint(value: int) -> bytes:
-    """Encode integer as protobuf varint"""
-    buf = bytearray()
-    while value > 0x7F:
-        buf.append((value & 0x7F) | 0x80)
-        value >>= 7
-    buf.append(value & 0x7F)
-    return bytes(buf)
-
-
-def _encode_protobuf_field(field_num: int, wire_type: int, data: bytes) -> bytes:
-    """Encode protobuf field: (field_num << 3) | wire_type + data"""
-    tag = (field_num << 3) | wire_type
-    result = bytearray(_encode_varint(tag))
-    
-    if wire_type == 2:  # length-delimited
-        result.extend(_encode_varint(len(data)))
-    
-    result.extend(data)
-    return bytes(result)
