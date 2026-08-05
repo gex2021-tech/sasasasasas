@@ -15,6 +15,7 @@ import ssl
 import struct
 import json
 import re
+from contextlib import contextmanager
 
 SERVER_IP = "192.168.1.136"   # <--- Cambia esto por la IP real de tu VPS / Servidor
 SERVER_PORT = 51820
@@ -22,6 +23,11 @@ SERVER_PORT = 51820
 QUEUE_WINDOW_SEC = 240      # Ventana de 4 minutos segura para buscar partida (Queue)
 REAUTH_COOLDOWN_SEC = 60    # Cooldown de 60s para recargar / refrescar auth
 STATE_FILE = os.path.join(os.path.dirname(__file__), "data", "loader_state.json")
+
+
+def _pack_len_prefixed(data: bytes) -> bytes:
+    """Length-prefixed field as used by the tunnel protocol."""
+    return struct.pack("!I", len(data)) + data
 
 try:
     import yaml
@@ -112,6 +118,21 @@ class EmulatorLoader:
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
     
+    def _create_exit_button(self, **overrides):
+        """Build the standard dark-theme Exit button."""
+        options = dict(
+            text="Exit",
+            font=("Consolas", 10),
+            bg='#1a1a1a',
+            fg='#666666',
+            activebackground='#1a1a1a',
+            border=0,
+            cursor='hand2',
+            command=self.exit_app,
+        )
+        options.update(overrides)
+        return tk.Button(self.root, **options)
+
     def create_ui(self):
         # Title
         title_label = tk.Label(
@@ -204,19 +225,7 @@ class EmulatorLoader:
             self.stage_labels.append(label)
         
         # Exit button (bottom right)
-        exit_button = tk.Button(
-            self.root,
-            text="Exit",
-            font=("Consolas", 10),
-            bg='#1a1a1a',
-            fg='#666666',
-            activebackground='#1a1a1a',
-            activeforeground='#999999',
-            border=0,
-            cursor='hand2',
-            command=self.exit_app
-        )
-        exit_button.pack(side='bottom', pady=10)
+        self._create_exit_button(activeforeground='#999999').pack(side='bottom', pady=10)
         
         # Status label (bottom)
         self.status_label = tk.Label(
@@ -280,6 +289,19 @@ class EmulatorLoader:
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
+    @contextmanager
+    def _server_connection(self, host, port, timeout=5):
+        """Context manager around _open_server_socket that always closes the socket."""
+        sock = self._open_server_socket(host, port, timeout)
+        try:
+            yield sock
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
     def _open_server_socket(self, host, port, timeout=5):
         """Open a TLS socket to the server. Returns socket or None."""
         try:
@@ -295,27 +317,20 @@ class EmulatorLoader:
 
     def _protocol_ping(self, host, port, timeout=3):
         """Send protocol PING (type 7) and verify PONG (type 8)."""
-        sock = None
         try:
-            sock = self._open_server_socket(host, port, timeout)
-            if not sock:
+            with self._server_connection(host, port, timeout) as sock:
+                if not sock:
+                    return False
+                sock.sendall(struct.pack("!II", 7, 0))
+                sock.settimeout(timeout)
+                header = sock.recv(8)
+                if len(header) == 8:
+                    msg_type, _ = struct.unpack("!II", header)
+                    return msg_type == 8
                 return False
-            sock.sendall(struct.pack("!II", 7, 0))
-            sock.settimeout(timeout)
-            header = sock.recv(8)
-            if len(header) == 8:
-                msg_type, _ = struct.unpack("!II", header)
-                return msg_type == 8
-            return False
         except Exception as e:
             print(f"[VGC-EMU] Protocol PING failed: {e}")
             return False
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
 
     def _protocol_send_ioctl(self, host, port, ioctl_code=0x22C0EC, data=b"", timeout=5):
         """Open a throwaway authenticated connection, send IOCTL, return response bytes.
@@ -323,81 +338,70 @@ class EmulatorLoader:
         Sends a minimal SESSION_AUTH first (requires auth_key from config),
         then sends the IOCTL and reads the IOCTL_RESP.  Returns response bytes or None.
         """
-        sock = None
         try:
-            sock = self._open_server_socket(host, port, timeout)
-            if not sock:
+            with self._server_connection(host, port, timeout) as sock:
+                if not sock:
+                    return None
+
+                # Read auth_key from config
+                config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+                auth_key = ""
+                if os.path.exists(config_path) and yaml:
+                    with open(config_path, 'r') as f:
+                        cfg = yaml.safe_load(f) or {}
+                        auth_key = cfg.get('tunnel', {}).get('auth_key', '')
+                if not auth_key:
+                    print("[VGC-EMU] No auth_key for IOCTL probe")
+                    return None
+
+                # Minimal SESSION_AUTH payload
+                body = _pack_len_prefixed(auth_key.encode("utf-8"))
+                body += _pack_len_prefixed(b"probe")                                  # gateway_machine_id
+                body += _pack_len_prefixed(b"probe_jwt_placeholder")                  # jwt  (non-empty)
+                body += _pack_len_prefixed(b"00000000-0000-0000-0000-000000000000")   # puuid
+                body += struct.pack("!I", 0)                                          # valorant_pid
+                body += struct.pack("!Q", int(time.time() * 1000))                    # client_ts_ms
+
+                # Send SESSION_AUTH (type 14)
+                sock.sendall(struct.pack("!II", 14, len(body)) + body)
+
+                msg_type, payload = self._recv_message(sock, timeout)
+                if msg_type is None:
+                    return None
+
+                if msg_type != 15:  # not SESSION_AUTH_OK
+                    err = payload.decode('utf-8', errors='replace') if msg_type == 9 else f"type={msg_type}"
+                    print(f"[VGC-EMU] IOCTL probe auth failed: {err}")
+                    return None
+
+                # Extract probe session id (for logging)
+                if payload and len(payload) >= 4:
+                    slen = struct.unpack_from("!I", payload, 0)[0]
+                    probe_sid = payload[4:4+slen].decode("utf-8", errors="replace")
+                    print(f"[VGC-EMU] Probe session: {probe_sid[:8]}")
+
+                # Now send IOCTL (type 4)
+                ioctl_body = struct.pack("!I", ioctl_code) + _pack_len_prefixed(data)
+                sock.sendall(struct.pack("!II", 4, len(ioctl_body)) + ioctl_body)
+
+                mt2, resp = self._recv_message(sock, timeout)
+                if mt2 == 5 and resp and len(resp) >= 4:  # IOCTL_RESP
+                    dlen = struct.unpack_from("!I", resp, 0)[0]
+                    return resp[4:4+dlen]
                 return None
-
-            # Read auth_key from config
-            config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-            auth_key = ""
-            if os.path.exists(config_path) and yaml:
-                with open(config_path, 'r') as f:
-                    cfg = yaml.safe_load(f) or {}
-                    auth_key = cfg.get('tunnel', {}).get('auth_key', '')
-            if not auth_key:
-                print("[VGC-EMU] No auth_key for IOCTL probe")
-                return None
-
-            # Helper: length-prefixed bytes
-            def _lp(b: bytes) -> bytes:
-                return struct.pack("!I", len(b)) + b
-
-            # Minimal SESSION_AUTH payload
-            body = _lp(auth_key.encode("utf-8"))
-            body += _lp(b"probe")                                             # gateway_machine_id
-            body += _lp(b"probe_jwt_placeholder")                              # jwt  (non-empty)
-            body += _lp(b"00000000-0000-0000-0000-000000000000")               # puuid
-            body += struct.pack("!I", 0)                                       # valorant_pid
-            body += struct.pack("!Q", int(time.time() * 1000))                 # client_ts_ms
-
-            # Send SESSION_AUTH (type 14)
-            sock.sendall(struct.pack("!II", 14, len(body)) + body)
-
-            # Read response header (full 8 bytes)
-            hdr = self._recv_exact(sock, 8, timeout)
-            if not hdr:
-                return None
-            msg_type, plen = struct.unpack("!II", hdr)
-            payload = self._recv_exact(sock, plen, timeout) if plen else b""
-
-            if msg_type != 15:  # not SESSION_AUTH_OK
-                err = payload.decode('utf-8', errors='replace') if msg_type == 9 else f"type={msg_type}"
-                print(f"[VGC-EMU] IOCTL probe auth failed: {err}")
-                return None
-
-            # Extract probe session id (for logging)
-            if payload and len(payload) >= 4:
-                slen = struct.unpack_from("!I", payload, 0)[0]
-                probe_sid = payload[4:4+slen].decode("utf-8", errors="replace")
-                print(f"[VGC-EMU] Probe session: {probe_sid[:8]}")
-
-            # Now send IOCTL (type 4)
-            ioctl_body = struct.pack("!I", ioctl_code) + struct.pack("!I", len(data)) + data
-            sock.sendall(struct.pack("!II", 4, len(ioctl_body)) + ioctl_body)
-
-            # Read IOCTL_RESP (type 5)
-            hdr2 = self._recv_exact(sock, 8, timeout)
-            if not hdr2:
-                return None
-            mt2, pl2 = struct.unpack("!II", hdr2)
-            resp = self._recv_exact(sock, pl2, timeout) if pl2 else b""
-
-            if mt2 == 5 and resp and len(resp) >= 4:  # IOCTL_RESP
-                dlen = struct.unpack_from("!I", resp, 0)[0]
-                return resp[4:4+dlen]
-            return None
 
         except Exception as e:
             print(f"[VGC-EMU] IOCTL probe failed: {e}")
             return None
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+
+    def _recv_message(self, sock, timeout=5):
+        """Read one framed message. Returns (msg_type, payload) or (None, b"")."""
+        hdr = self._recv_exact(sock, 8, timeout)
+        if not hdr:
+            return None, b""
+        msg_type, plen = struct.unpack("!II", hdr)
+        payload = self._recv_exact(sock, plen, timeout) if plen else b""
+        return msg_type, payload or b""
 
     def _recv_exact(self, sock, n, timeout=5):
         """Read exactly n bytes from socket.  Returns bytes or None."""
@@ -949,18 +953,7 @@ class EmulatorLoader:
         config_btn.pack(side='left', padx=10)
         
         # Exit button
-        exit_button = tk.Button(
-            self.root,
-            text="Exit",
-            font=("Consolas", 10),
-            bg='#1a1a1a',
-            fg='#666666',
-            activebackground='#1a1a1a',
-            border=0,
-            cursor='hand2',
-            command=self.exit_app
-        )
-        exit_button.pack(pady=20)
+        self._create_exit_button().pack(pady=20)
     
     def open_config(self):
         """Open config.yaml in default editor"""
@@ -1224,18 +1217,7 @@ class EmulatorLoader:
         inject_btn.pack(side='left', padx=10)
         
         # Exit button
-        exit_button = tk.Button(
-            self.root,
-            text="Exit",
-            font=("Consolas", 10),
-            bg='#1a1a1a',
-            fg='#666666',
-            activebackground='#1a1a1a',
-            border=0,
-            cursor='hand2',
-            command=self.exit_app
-        )
-        exit_button.pack(pady=10)
+        self._create_exit_button().pack(pady=10)
         
         # Start live queue window & cooldown loop
         self.update_live_queue_and_cooldown()

@@ -126,14 +126,10 @@ def _compute_composite(bios: str, cpu: str, vol: str, guid: str) -> bytes:
     return hashlib.sha256(composite.encode("utf-8")).digest()
 
 
-def generate_hwid() -> HwidProfile:
-    """Generate a fully random but realistic HWID profile."""
-    bios = random.choice(_BIOS_VERSIONS)
-    cpu = random.choice(_CPU_MODELS)
-    gpu_brand, gpu_model = random.choice(_GPU_BRANDS_MODELS)
-    vol = f"{random.randint(0, 0xFFFFFFFF):08X}"
-    guid = str(uuid.uuid4())
-
+def _build_profile(
+    bios: str, cpu: str, gpu_brand: str, gpu_model: str, vol: str, guid: str
+) -> HwidProfile:
+    """Assemble a profile, deriving the CPU/composite fields from the raw values."""
     return HwidProfile(
         bios_version=bios,
         cpu_model=cpu,
@@ -144,6 +140,19 @@ def generate_hwid() -> HwidProfile:
         volume_serial=vol,
         machine_guid=guid,
         composite_hash=_compute_composite(bios, cpu, vol, guid),
+    )
+
+
+def generate_hwid() -> HwidProfile:
+    """Generate a fully random but realistic HWID profile."""
+    gpu_brand, gpu_model = random.choice(_GPU_BRANDS_MODELS)
+    return _build_profile(
+        bios=random.choice(_BIOS_VERSIONS),
+        cpu=random.choice(_CPU_MODELS),
+        gpu_brand=gpu_brand,
+        gpu_model=gpu_model,
+        vol=f"{random.randint(0, 0xFFFFFFFF):08X}",
+        guid=str(uuid.uuid4()),
     )
 
 
@@ -168,17 +177,7 @@ def rotate_hwid(previous: HwidProfile) -> HwidProfile:
     vol = f"{random.randint(0, 0xFFFFFFFF):08X}" if "vol" in fields_to_change else previous.volume_serial
     guid = str(uuid.uuid4()) if "guid" in fields_to_change else previous.machine_guid
 
-    profile = HwidProfile(
-        bios_version=bios,
-        cpu_model=cpu,
-        cpu_brand=_cpu_brand(cpu),
-        cpu_logical_count=_core_count_for(cpu),
-        gpu_brand=gpu_brand,
-        gpu_model=gpu_model,
-        volume_serial=vol,
-        machine_guid=guid,
-        composite_hash=_compute_composite(bios, cpu, vol, guid),
-    )
+    profile = _build_profile(bios, cpu, gpu_brand, gpu_model, vol, guid)
     log.info(
         "hwid rotated: changed=%s hash=%s",
         ",".join(fields_to_change),

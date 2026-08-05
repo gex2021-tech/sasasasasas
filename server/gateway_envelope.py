@@ -27,6 +27,14 @@ import time
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
+from .protobuf_util import (
+    encode_bytes_field,
+    encode_field,
+    encode_string_field,
+    encode_varint,
+    encode_varint_field,
+)
+
 log = logging.getLogger("gateway_mint")
 
 
@@ -167,19 +175,19 @@ class SmartGatewayMinty:
         
         payload = bytearray()
         
-        payload.extend(self._encode_string_field(1, tokens.entitlement_token))
-        payload.extend(self._encode_string_field(2, tokens.id_token))
-        payload.extend(self._encode_string_field(3, tokens.access_token))
-        payload.extend(self._encode_string_field(4, tokens.puuid))
+        payload.extend(encode_string_field(1, tokens.entitlement_token))
+        payload.extend(encode_string_field(2, tokens.id_token))
+        payload.extend(encode_string_field(3, tokens.access_token))
+        payload.extend(encode_string_field(4, tokens.puuid))
         
         machine_msg = self._encode_machine_profile(machine_profile)
-        payload.extend(self._encode_bytes_field(5, machine_msg))
+        payload.extend(encode_bytes_field(5, machine_msg))
         
         timestamp_ms = int(time.time() * 1000)
-        payload.extend(self._encode_varint_field(6, timestamp_ms))
+        payload.extend(encode_varint_field(6, timestamp_ms))
         
         signature = hmac.new(auth_secret, bytes(payload), hashlib.sha256).digest()
-        payload.extend(self._encode_bytes_field(7, signature))
+        payload.extend(encode_bytes_field(7, signature))
         
         return bytes(payload)
     
@@ -187,49 +195,20 @@ class SmartGatewayMinty:
         msg = bytearray()
         
         if "bios_info" in profile:
-            msg.extend(self._encode_string_field(1, profile["bios_info"]))
+            msg.extend(encode_string_field(1, profile["bios_info"]))
         if "cpu_model" in profile:
-            msg.extend(self._encode_string_field(2, profile["cpu_model"]))
+            msg.extend(encode_string_field(2, profile["cpu_model"]))
         if "gpu_model" in profile:
-            msg.extend(self._encode_string_field(3, profile["gpu_model"]))
+            msg.extend(encode_string_field(3, profile["gpu_model"]))
         if "hostname" in profile:
-            msg.extend(self._encode_string_field(4, profile["hostname"]))
+            msg.extend(encode_string_field(4, profile["hostname"]))
         if "volume_serial" in profile:
-            msg.extend(self._encode_string_field(5, profile["volume_serial"]))
+            msg.extend(encode_string_field(5, profile["volume_serial"]))
         if "cpu_logical_count" in profile:
-            msg.extend(self._encode_varint_field(6, profile["cpu_logical_count"]))
+            msg.extend(encode_varint_field(6, profile["cpu_logical_count"]))
         
         return bytes(msg)
     
-    def _encode_string_field(self, field_num: int, value: str) -> bytes:
-        data = value.encode('utf-8')
-        tag = (field_num << 3) | 2
-        result = bytearray(self._encode_varint(tag))
-        result.extend(self._encode_varint(len(data)))
-        result.extend(data)
-        return bytes(result)
-    
-    def _encode_bytes_field(self, field_num: int, data: bytes) -> bytes:
-        tag = (field_num << 3) | 2
-        result = bytearray(self._encode_varint(tag))
-        result.extend(self._encode_varint(len(data)))
-        result.extend(data)
-        return bytes(result)
-    
-    def _encode_varint_field(self, field_num: int, value: int) -> bytes:
-        tag = (field_num << 3) | 0
-        result = bytearray(self._encode_varint(tag))
-        result.extend(self._encode_varint(value))
-        return bytes(result)
-    
-    def _encode_varint(self, value: int) -> bytes:
-        buf = bytearray()
-        while value > 0x7F:
-            buf.append((value & 0x7F) | 0x80)
-            value >>= 7
-        buf.append(value & 0x7F)
-        return bytes(buf)
-
 
 def post_gateway_auth(payload: bytes, region: str, session_id: str) -> Tuple[int, bytes]:
     """POST auth payload to regional Vanguard gateway"""
@@ -256,24 +235,6 @@ def build_gateway_auth_response(session_id: str, region: str) -> bytes:
     }
     
     return json.dumps(response).encode('utf-8')
-
-
-def _encode_varint_bytes(value: int) -> bytes:
-    buf = bytearray()
-    while value > 0x7F:
-        buf.append((value & 0x7F) | 0x80)
-        value >>= 7
-    buf.append(value & 0x7F)
-    return bytes(buf)
-
-
-def _encode_proto_field(field_num: int, wire_type: int, data: bytes) -> bytes:
-    tag = (field_num << 3) | wire_type
-    result = bytearray(_encode_varint_bytes(tag))
-    if wire_type == 2:  # length-delimited
-        result.extend(_encode_varint_bytes(len(data)))
-    result.extend(data)
-    return bytes(result)
 
 
 def build_gateway_envelope(
@@ -309,33 +270,33 @@ def build_gateway_envelope(
     envelope = bytearray()
 
     # Field 1: version (varint) - 1
-    envelope.extend(_encode_proto_field(1, 0, _encode_varint_bytes(1)))
+    envelope.extend(encode_field(1, 0, encode_varint(1)))
 
     # Field 2: signed_token / F1 token (bytes)
-    envelope.extend(_encode_proto_field(2, 2, f1_token))
+    envelope.extend(encode_field(2, 2, f1_token))
 
     # Field 3: client_info (bytes / sub-message)
     client_info = bytearray()
-    client_info.extend(_encode_proto_field(1, 2, puuid.encode('utf-8') if puuid else b''))
-    client_info.extend(_encode_proto_field(2, 2, region.encode('utf-8') if region else b'la'))
-    client_info.extend(_encode_proto_field(3, 2, client_ver.encode('utf-8')))
+    client_info.extend(encode_field(1, 2, puuid.encode('utf-8') if puuid else b''))
+    client_info.extend(encode_field(2, 2, region.encode('utf-8') if region else b'la'))
+    client_info.extend(encode_field(3, 2, client_ver.encode('utf-8')))
     if rsa_spki_pem:
-        client_info.extend(_encode_proto_field(4, 2, rsa_spki_pem))
-    envelope.extend(_encode_proto_field(3, 2, bytes(client_info)))
+        client_info.extend(encode_field(4, 2, rsa_spki_pem))
+    envelope.extend(encode_field(3, 2, bytes(client_info)))
 
     # Field 4: timestamp (fixed64)
-    envelope.extend(_encode_proto_field(4, 1, struct.pack("<Q", timestamp_ms)))
+    envelope.extend(encode_field(4, 1, struct.pack("<Q", timestamp_ms)))
 
     # Field 5: OS Info (sub-message, VAL 5 fix)
     os_info = bytearray()
-    os_info.extend(_encode_proto_field(1, 0, _encode_varint_bytes(1)))  # platform: 1=Windows
-    os_info.extend(_encode_proto_field(2, 0, _encode_varint_bytes(2)))  # architecture: 2=x64
-    os_info.extend(_encode_proto_field(3, 2, b'10.0.19045'))             # version: 10.0.19045
-    os_info.extend(_encode_proto_field(4, 0, _encode_varint_bytes(1)))  # variant: 1=Pro
-    envelope.extend(_encode_proto_field(5, 2, bytes(os_info)))
+    os_info.extend(encode_field(1, 0, encode_varint(1)))  # platform: 1=Windows
+    os_info.extend(encode_field(2, 0, encode_varint(2)))  # architecture: 2=x64
+    os_info.extend(encode_field(3, 2, b'10.0.19045'))             # version: 10.0.19045
+    os_info.extend(encode_field(4, 0, encode_varint(1)))  # variant: 1=Pro
+    envelope.extend(encode_field(5, 2, bytes(os_info)))
 
     # Field 15: F15 Token (string/bytes)
-    envelope.extend(_encode_proto_field(15, 2, f15_token.encode('utf-8')))
+    envelope.extend(encode_field(15, 2, f15_token.encode('utf-8')))
 
     return bytes(envelope)
 

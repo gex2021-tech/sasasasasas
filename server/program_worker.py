@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .net_util import recv_exact
+
 log = logging.getLogger("program_worker")
 
 _CMD_MOUNT = 1
@@ -150,17 +152,7 @@ class ProgramWorker:
         with socket.create_connection(("127.0.0.1", self.port), timeout=ms / 1000.0) as sock:
             sock.settimeout(ms / 1000.0)
             sock.sendall(req)
-            hdr = self._recv_exact(sock, _RESP.size)
+            hdr = recv_exact(sock, _RESP.size, "short read from program.exe")
             status, dlen = _RESP.unpack(hdr)
-            body = self._recv_exact(sock, dlen) if dlen else b""
+            body = recv_exact(sock, dlen, "short read from program.exe") if dlen else b""
             return status, body
-
-    @staticmethod
-    def _recv_exact(sock: socket.socket, size: int) -> bytes:
-        buf = bytearray()
-        while len(buf) < size:
-            chunk = sock.recv(size - len(buf))
-            if not chunk:
-                raise OSError("short read from program.exe")
-            buf.extend(chunk)
-        return bytes(buf)

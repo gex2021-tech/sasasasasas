@@ -4,11 +4,15 @@ Validation script for VGC Emulator
 Tests all components and verifies functionality
 """
 import socket
-import ssl
 import struct
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from server.net_util import connect_tls, recv_message
+from server.protocol import MsgType, pack, pack_session_auth
 
 # Colors for terminal output
 class Colors:
@@ -256,25 +260,15 @@ def test_server_connection(host='192.168.1.136', port=51820):
     print_test(f"Testing server connection to {host}:{port}...")
     
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        sock = connect_tls(host, port, timeout=5)
         
-        raw_sock = socket.create_connection((host, port), timeout=5)
-        sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        sock.sendall(pack(MsgType.PING))
         
-        # Send PING
-        ping_msg = struct.pack("!II", 7, 0)  # MsgType.PING, no payload
-        sock.sendall(ping_msg)
-        
-        # Receive PONG
-        header = sock.recv(8)
-        if len(header) == 8:
-            msg_type, payload_len = struct.unpack("!II", header)
-            if msg_type == 8:  # MsgType.PONG
-                print_pass("Server is responding to PING")
-                sock.close()
-                return True
+        msg_type, _ = recv_message(sock) or (None, b"")
+        if msg_type == MsgType.PONG:
+            print_pass("Server is responding to PING")
+            sock.close()
+            return True
         
         sock.close()
         print_warn("Server responded but not with PONG")
@@ -299,79 +293,50 @@ def test_protocol_flow(host='192.168.1.136', port=51820, auth_key='feqxYc-ilusao
     import uuid
     
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        raw_sock = socket.create_connection((host, port), timeout=10)
-        sock = ctx.wrap_socket(raw_sock, server_hostname=host)
-        
-        # Build SESSION_AUTH
-        def pack_len_str(s):
-            encoded = s.encode('utf-8')
-            return struct.pack("!I", len(encoded)) + encoded
-        
-        def pack_len_bytes(b):
-            return struct.pack("!I", len(b)) + b
-        
-        payload = b''
-        payload += pack_len_str(auth_key)
-        payload += pack_len_bytes(os.urandom(32))  # gateway_machine_id
-        payload += pack_len_str('eyJhbGciOiJSUzI1NiJ9.test.signature')  # jwt
-        payload += pack_len_str(str(uuid.uuid4()))  # puuid
-        payload += struct.pack("!I", 12345)  # valorant_pid
-        payload += struct.pack("!Q", int(time.time() * 1000))  # timestamp
-        payload += pack_len_str('la')  # region
-        payload += pack_len_bytes(os.urandom(32))  # hwid_fingerprint
-        payload += pack_len_str('test_account')  # riot_account
-        payload += pack_len_str('TEST-PC')  # hostname
-        
-        msg = struct.pack("!II", 14, len(payload)) + payload  # MsgType.SESSION_AUTH
-        sock.sendall(msg)
-        
-        # Receive response
-        header = sock.recv(8)
-        if len(header) < 8:
+        sock = connect_tls(host, port, timeout=10)
+
+        payload = pack_session_auth(
+            auth_key=auth_key,
+            gateway_machine_id=os.urandom(32),
+            jwt='eyJhbGciOiJSUzI1NiJ9.test.signature',
+            puuid=str(uuid.uuid4()),
+            valorant_pid=12345,
+            client_ts_ms=int(time.time() * 1000),
+            region='la',
+            hwid_fingerprint=os.urandom(32),
+            riot_account='test_account',
+            hostname='TEST-PC',
+        )
+        sock.sendall(pack(MsgType.SESSION_AUTH, payload))
+
+        response = recv_message(sock)
+        if response is None:
             raise ValidationError("Incomplete response header")
-        
-        msg_type, payload_len = struct.unpack("!II", header)
-        
-        if msg_type == 9:  # ERROR
-            error_msg = sock.recv(payload_len).decode('utf-8', errors='ignore')
-            raise ValidationError(f"Server error: {error_msg}")
-        
-        if msg_type != 15:  # SESSION_AUTH_OK
+        msg_type, response_payload = response
+
+        if msg_type == MsgType.ERROR:
+            raise ValidationError(f"Server error: {response_payload.decode('utf-8', errors='ignore')}")
+
+        if msg_type != MsgType.SESSION_AUTH_OK:
             raise ValidationError(f"Unexpected response type: {msg_type}")
-        
-        response_payload = b''
-        while len(response_payload) < payload_len:
-            chunk = sock.recv(payload_len - len(response_payload))
-            if not chunk:
-                break
-            response_payload += chunk
-        
+
         # Parse session_id
         sid_len = struct.unpack("!I", response_payload[:4])[0]
         session_id = response_payload[4:4+sid_len].decode('utf-8')
-        
+
         print_pass(f"SESSION_AUTH successful. Session ID: {session_id[:8]}...")
-        
+
         # Test IOCTL
-        ioctl_payload = struct.pack("!I", 0x222000) + struct.pack("!I", 0)
-        ioctl_msg = struct.pack("!II", 4, len(ioctl_payload)) + ioctl_payload
-        sock.sendall(ioctl_msg)
-        
-        header = sock.recv(8)
-        msg_type, payload_len = struct.unpack("!II", header)
-        
-        if msg_type == 5:  # IOCTL_RESP
-            ioctl_resp = sock.recv(payload_len)
+        sock.sendall(pack(MsgType.IOCTL, struct.pack("!I", 0x222000) + struct.pack("!I", 0)))
+
+        msg_type, ioctl_resp = recv_message(sock) or (None, b"")
+        if msg_type == MsgType.IOCTL_RESP:
             resp_len = struct.unpack("!I", ioctl_resp[:4])[0]
             print_pass(f"IOCTL response received: {resp_len} bytes")
-        
+
         sock.close()
         return True
-        
+
     except Exception as e:
         print_fail(f"Protocol test failed: {e}")
         return False

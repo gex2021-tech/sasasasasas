@@ -11,6 +11,7 @@ from typing import Optional
 
 from .gateway_envelope import build_gateway_envelope
 from .heartbeat_scheduler import HeartbeatRelay
+from .net_util import recv_exact
 from .protocol import (
     HEADER,
     MsgType,
@@ -80,9 +81,9 @@ class TunnelServer:
                 conn.settimeout(120.0)
                 log.info("client connect %s", addr)
                 while True:
-                    hdr = self._read(conn, HEADER.size)
+                    hdr = recv_exact(conn, HEADER.size)
                     mt, plen = unpack_header(hdr)
-                    payload = self._read(conn, plen) if plen else b""
+                    payload = recv_exact(conn, plen) if plen else b""
 
                     if mt == MsgType.SESSION_AUTH:
                         auth = parse_session_auth(payload)
@@ -186,12 +187,3 @@ class TunnelServer:
                 log.info("tunnel closed session=%s stays on server", session_id[:8])
             with self._lock:
                 self._clients -= 1
-
-    def _read(self, conn: ssl.SSLSocket, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = conn.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("eof")
-            buf += chunk
-        return buf
