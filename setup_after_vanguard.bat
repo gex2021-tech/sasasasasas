@@ -21,14 +21,19 @@ if %errorLevel% neq 0 (
 echo [1/6] Privilegios de administrador verificados. OK.
 echo.
 :: [2/6] Verificar que vgk.sys esté instalado
-if not exist "C:\Windows\System32\drivers\vgk.sys" (
+set VGK_FOUND=0
+if exist "C:\Windows\System32\drivers\vgk.sys" set VGK_FOUND=1
+if exist "C:\Program Files\Riot Vanguard\vgk.sys" set VGK_FOUND=1
+
+if "%VGK_FOUND%"=="0" (
     echo [ERROR] vgk.sys no encontrado. Instala Vanguard oficialmente primero:
     echo https://valorant.playvalorant.com/download/
     echo Luego reinicia tu PC y vuelve a ejecutar este script.
     pause
     exit /b 1
 )
-echo [2/6] vgk.sys detectado en C:\Windows\System32\drivers\vgk.sys. OK.
+echo [2/6] vgk.sys detectado correctamente. OK.
+
 echo.
 :: [3/6] Iniciar servicio vgc si está detenido
 sc query vgc | find "RUNNING" >nul
