@@ -421,15 +421,14 @@ class EmulatorLoader:
         return False
 
     def _parse_vclient_log(self):
-        """Parse vClient.log for session ID, IOCTL activity, and tunnel status.
-        
-        Returns: (session_id: str|None, ioctl_active: bool, tunnel_active: bool)
-        """
-        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        """Parse vClient.log for session ID, IOCTL activity, and tunnel status."""
         session_id = None
         ioctl_active = False
         tunnel_active = False
 
+        log_path = os.path.join(os.path.dirname(__file__), "build", "vClient.log")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
         if not os.path.exists(log_path):
             return session_id, ioctl_active, tunnel_active
 
@@ -1301,29 +1300,7 @@ class EmulatorLoader:
         self.run()
     
     def exit_app(self):
-        """Exit application and terminate all game, client and tunnel processes"""
-        try:
-            processes_to_kill = [
-                'valorant-win64-shipping.exe', 
-                'valorant.exe', 
-                'riotclientservices.exe', 
-                'riotclientux.exe', 
-                'vclient.exe', 
-                'vgc.exe'
-            ]
-            for proc in psutil.process_iter(['name']):
-                try:
-                    name = proc.info['name'].lower()
-                    if any(p in name for p in processes_to_kill):
-                        proc.kill()
-                except:
-                    pass
-        except Exception as e:
-            print(f"Error terminating processes on exit: {e}")
-        
-        # Optionally restore VGC service on exit (uncomment if you want Vanguard back)
-        # self.restore_vanguard_service()
-        
+        """Exit application without terminating active game/tunnel if running"""
         self.root.quit()
         self.root.destroy()
         sys.exit(0)
