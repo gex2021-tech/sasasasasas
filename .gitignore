@@ -1,4 +1,3 @@
-```
-# Windows batch files backup
-setup_after_vanguard.bat
-```
+# Standard gitignore
+*.log
+__pycache__/
