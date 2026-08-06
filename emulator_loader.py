@@ -1403,6 +1403,89 @@ class EmulatorLoader:
             self._cache_session_state()
             return True
 
+    def _wait_for_valid_heartbeat_cache(self, timeout=20):
+        """Wait for vClient to receive valid heartbeat cache (289-293 bytes).
+
+        Critical VAL 5 prevention — confirms dual-cache fix is working.
+        """
+        start = time.time()
+
+        while time.time() - start < timeout:
+            session_id, hb_ok, drv_ok, size, cache_type = self._parse_vclient_log_detailed()
+
+            if hb_ok:
+                if cache_type == "gateway_token":
+                    self.update_status(f"✓ Cache valid: {size} bytes (gateway token)")
+                    return True
+                elif cache_type == "contaminated_driver_status":
+                    self.update_status(f"✗ CACHE CONTAMINATED: {size} bytes (driver status)")
+                    self.show_cache_error()
+                    return False
+
+            time.sleep(1)
+
+        # Timeout - assume fallback token will work
+        self.update_status("Cache validation timeout - proceeding with fallback")
+        return True
+
+    def _cache_session_state(self):
+        """Save session ID to prevent duplicates on restart"""
+        try:
+            if self._vclient_session_id:
+                state_file = os.path.join(os.path.dirname(__file__), "data", "session_state.json")
+                os.makedirs(os.path.dirname(state_file), exist_ok=True)
+
+                data = {
+                    "session_id": self._vclient_session_id,
+                    "timestamp": time.time(),
+                }
+                with open(state_file, 'w') as f:
+                    json.dump(data, f)
+
+                print(f"[VGC-EMU] Session cached: {self._vclient_session_id[:8]}")
+        except Exception as e:
+            print(f"[VGC-EMU] Cache session error: {e}")
+
+    def _validate_heartbeat_cache(self, timeout=5):
+        """Quick cache size validation without full parsing"""
+        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+
+        if not os.path.exists(log_path):
+            return False, 0, "No log"
+
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                lines = f.readlines()
+
+            # Scan last 30 lines for recent cache reports
+            scan = lines[-30:] if len(lines) > 30 else lines
+
+            for line in reversed(scan):
+                # Pattern: [KEEPALIVE] HEARTBEAT OK: size=293
+                if '[KEEPALIVE]' not in line or 'HEARTBEAT' not in line:
+                    continue
+
+                # Extract size
+                match = re.search(r'size=(\d+)', line)
+                if not match:
+                    continue
+
+                size = int(match.group(1))
+
+                # Valid: 289-293 bytes (gateway token)
+                # Invalid: <150 bytes (driver status contamination)
+                if 289 <= size <= 293:
+                    return True, size, "Gateway token"
+                elif size < 200:
+                    return False, size, f"CONTAMINATED: {size}b (driver status)"
+                else:
+                    return True, size, f"Token ({size}b)"
+
+            return False, 0, "No heartbeat cache found yet"
+
+        except Exception as e:
+            return False, 0, f"Parse error: {e}"
+
     # ──────────────────────────────────────────────────────────
     #  Ready screen
     # ──────────────────────────────────────────────────────────
