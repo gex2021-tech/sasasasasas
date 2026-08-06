@@ -15,57 +15,54 @@ from base64 import b64encode
 from typing import Tuple
 
 
-def build_f1_token(puuid: str, hwid: bytes, timestamp_ms: int = None) -> bytes:
-    """Build F1 token with 6 sub-components
-    
-    Structure:
-    1. Nonce (16 bytes) - random
-    2. HMAC-SHA512 #1 (64 bytes) - HMAC(secret_key, puuid + nonce)
-    3. HMAC-SHA512 #2 (64 bytes) - HMAC(secret_key, hwid + timestamp)
-    4. Empty token (0 bytes)
-    5. Timestamp (6 bytes) - milliseconds since epoch, little-endian
-    6. Hardware blob (variable) - derived from PUUID + HWID
-    
-    Args:
-        puuid: Player UUID
-        hwid: Hardware ID fingerprint (32 bytes)
-        timestamp_ms: Optional timestamp in milliseconds
-    
-    Returns:
-        Complete F1 token (typically ~170-200 bytes)
+def build_f1_token(
+    puuid: str,
+    hwid: bytes,
+    entitlements_token: str = "",
+    timestamp_ms: int = None
+) -> bytes:
+    """Build F1 token matching VGC Gateway format
+
+    F1 = nonce (16) + HMAC1 (64) + HMAC2 (64) + empty (0) + ts_6bytes (6) + hw_blob (16)
+    Total size: 166 bytes
     """
     if timestamp_ms is None:
         timestamp_ms = int(time.time() * 1000)
-    
-    # Derive secret key from PUUID (first 32 bytes of SHA256)
-    secret_key = hashlib.sha256(puuid.encode()).digest()
-    
+
+    # Derive secret key: prefer entitlements_token, fallback to HWID or PUUID
+    if entitlements_token:
+        secret_key = hashlib.sha256(entitlements_token.encode("utf-8")).digest()
+    elif hwid and len(hwid) > 0:
+        secret_key = hashlib.sha256(hwid).digest()
+    else:
+        secret_key = hashlib.sha256(puuid.encode("utf-8")).digest()
+
     # Component 1: Random nonce (16 bytes)
     nonce = os.urandom(16)
-    
+
     # Component 2: HMAC-SHA512(secret_key, puuid + nonce)
-    hmac_data_1 = puuid.encode() + nonce
+    hmac_data_1 = puuid.encode("utf-8") + nonce
     hmac_1 = hmac.new(secret_key, hmac_data_1, hashlib.sha512).digest()
-    
+
     # Component 3: HMAC-SHA512(secret_key, hwid + timestamp)
     ts_bytes = struct.pack("<Q", timestamp_ms)
-    hmac_data_2 = hwid[:32] + ts_bytes
+    hwid_clean = hwid[:32] if hwid else b'\x00' * 32
+    hmac_data_2 = hwid_clean + ts_bytes
     hmac_2 = hmac.new(secret_key, hmac_data_2, hashlib.sha512).digest()
-    
+
     # Component 4: Empty (0 bytes)
     empty = b""
-    
+
     # Component 5: Timestamp (6 bytes, little-endian)
-    # Take lower 48 bits of timestamp
     ts_6bytes = struct.pack("<Q", timestamp_ms)[:6]
-    
+
     # Component 6: Hardware blob derived from PUUID + HWID
-    hw_blob_seed = (puuid + hwid.hex()).encode()
+    hw_blob_seed = (puuid + hwid_clean.hex()).encode("utf-8")
     hw_blob = hashlib.sha256(hw_blob_seed).digest()[:16]
-    
-    # Concatenate all components
+
+    # Concatenate all components (exactly 166 bytes)
     f1_token = nonce + hmac_1 + hmac_2 + empty + ts_6bytes + hw_blob
-    
+
     return f1_token
 
 

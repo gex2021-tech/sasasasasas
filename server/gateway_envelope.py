@@ -284,6 +284,7 @@ def build_gateway_envelope(
     build_info: dict | None = None,
     rsa_spki_pem: bytes = b"",
     timestamp_ms: int = 0,
+    entitlements_token: str = "",
 ) -> bytes:
     """Build dynamic protobuf gateway envelope with F1, F15, OSInfo, and client info"""
     from .vgc_tokens import build_f1_token, build_f15_token
@@ -296,8 +297,8 @@ def build_gateway_envelope(
     except ValueError:
         hwid_bytes = hwid_hex.encode() if hwid_hex else b'\x00' * 32
 
-    # 1. Build F1 token
-    f1_token = build_f1_token(puuid, hwid_bytes, timestamp_ms)
+    # 1. Build F1 token with entitlements_token key derivation
+    f1_token = build_f1_token(puuid, hwid_bytes, entitlements_token=entitlements_token, timestamp_ms=timestamp_ms)
 
     # 2. Build F15 token
     if build_info:
