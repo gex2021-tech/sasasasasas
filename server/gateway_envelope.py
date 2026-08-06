@@ -251,20 +251,36 @@ def post_gateway_auth(
     try:
         log.info(f"[GW] POST {url} envelope={len(payload)}B region={region} puuid={puuid[:8] if puuid else 'N/A'}")
         if entitlements_token and id_token:
-            res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
-            log.info(f"[GW] Gateway HTTP {res.status_code} response={len(res.content)}B")
-            if res.status_code == 200:
-                log.info(f"[GW] *** GATEWAY AUTH OK region={region} action=3 ***")
+            res = None
+            max_retries = 2
+            for attempt in range(1, max_retries + 1):
+                try:
+                    res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+                    if res.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                        log.warning(f"[GW] Gateway returned {res.status_code}, retrying attempt {attempt}/{max_retries} in 250ms...")
+                        time.sleep(0.25)
+                        continue
+                    break
+                except requests.RequestException as req_err:
+                    if attempt < max_retries:
+                        log.warning(f"[GW] Gateway connection error ({req_err}), retrying attempt {attempt}/{max_retries}...")
+                        time.sleep(0.25)
+                        continue
+                    raise
+
+            if res and res.status_code == 200:
+                resp_sha1 = hashlib.sha1(res.content).hexdigest()[:8]
+                log.info(f"[GW] *** GATEWAY AUTH OK region={region} action=3 len={len(res.content)}B sha1={resp_sha1} ***")
                 return 200, res.content
-            else:
+            elif res:
                 log.warning(f"[GW] Gateway HTTP {res.status_code}: {res.text[:150]}")
-                # Fallback to local response if remote gateway returns non-200 in emulation mode
                 return 200, build_gateway_auth_response(session_id, region)
     except Exception as e:
         log.warning(f"[GW] Gateway POST network attempt notice: {e}")
 
     response_body = build_gateway_auth_response(session_id, region)
-    log.info(f"[GW] HTTP 200 action=3(AUTH) body={len(response_body)}B region={region}")
+    resp_sha1 = hashlib.sha1(response_body).hexdigest()[:8]
+    log.info(f"[GW] HTTP 200 action=3(AUTH) body={len(response_body)}B sha1={resp_sha1} region={region}")
     return 200, response_body
 
 

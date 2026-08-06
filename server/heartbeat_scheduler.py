@@ -60,6 +60,13 @@ class HeartbeatScheduler:
         ioctl_code: int = 0x222000,
         data: bytes = b"",
     ) -> bytes:
+        """Dispatch a heartbeat IOCTL ping/payload.
+        
+        Args:
+            force: Signals immediate/on-demand heartbeat dispatch regardless of tick interval.
+            ioctl_code: IOCTL opcode (0x222000 default or 0x22C0EC/0x222004 DeviceType 0x22).
+            data: Payload input buffer.
+        """
         with self._lock:
             self.sequence += 1
             seq = self.sequence

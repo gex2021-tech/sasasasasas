@@ -15,7 +15,7 @@ from .protocol import SessionAuthData
 from .riot_proxy import RiotProxy
 from .wine_manager import WineManager
 from .machine_pool import select_machine_for_session
-from .gateway_envelope import SmartGatewayMinty, post_gateway_auth, start_keepalive_loop
+from .gateway_envelope import build_gateway_envelope, post_gateway_auth
 
 log = logging.getLogger("session_manager")
 
@@ -337,7 +337,6 @@ class SessionManager:
             return False
 
         # CRITICAL: Build gateway envelope with REAL tokens from vClient
-        from .gateway_envelope import build_gateway_envelope, post_gateway_auth
 
         entitlements_token = getattr(snap, 'entitlements_token', '') or getattr(snap, 'entitlement_token', '') or snap.riot_token
         id_token = getattr(snap, 'id_token', '')
