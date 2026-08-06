@@ -1,3 +1,14 @@
 # Standard gitignore
 *.log
-__pycache__/
+__pycache__/
+*.pyc
+.env
+.vscode/
+data/
+logs/
+scratch/
+build/
+*.bak
+*.bak2
+query
+start

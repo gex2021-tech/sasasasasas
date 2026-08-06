@@ -96,9 +96,13 @@ class SessionManager:
 
     def create_on_session_auth(self, auth: SessionAuthData, client_ip: str) -> Optional[str]:
         """SESSION_AUTH — cria sessão VM + container num único handshake."""
+        puuid = auth.puuid or ""
+        if auth.jwt == "probe_jwt_placeholder" or puuid.startswith("00000000"):
+            log.warning("Ignoring dummy probe session_auth from %s", client_ip)
+            return None
+
         region = auth.region or shard_from_jwt(auth.jwt)
         riot_account = auth.riot_account or account_from_jwt(auth.jwt)
-        puuid = auth.puuid or ""
 
         # Purge stale/previous active sessions for the same PUUID to avoid duplicate sessions (VAL 5 trigger)
         if puuid:
@@ -129,13 +133,13 @@ class SessionManager:
             client_ts_ms=auth.client_ts_ms,
             region=region,
             riot_account=riot_account,
-            hostname=machine_profile.get("hostname", auth.hostname),  # Use pooled hostname
+            hostname=auth.hostname if auth.hostname else machine_profile.get("hostname", "WIN-PC"),
             client_ip=client_ip,
-            cpu_brand=machine_profile.get("cpu_brand", auth.cpu_brand),  # Use pooled CPU
-            cpu_model=machine_profile.get("cpu_model", auth.cpu_model),
-            gpu_brand=machine_profile.get("gpu_brand", auth.gpu_brand),  # Use pooled GPU
-            gpu_model=machine_profile.get("gpu_model", auth.gpu_model),
-            cpu_logical_count=machine_profile.get("cpu_logical_count", auth.cpu_logical_count),
+            cpu_brand=auth.cpu_brand if auth.cpu_brand else machine_profile.get("cpu_brand", "Intel"),
+            cpu_model=auth.cpu_model if auth.cpu_model else machine_profile.get("cpu_model", "Intel Core"),
+            gpu_brand=auth.gpu_brand if auth.gpu_brand else machine_profile.get("gpu_brand", "Intel"),
+            gpu_model=auth.gpu_model if auth.gpu_model else machine_profile.get("gpu_model", "Intel UHD"),
+            cpu_logical_count=auth.cpu_logical_count if auth.cpu_logical_count else machine_profile.get("cpu_logical_count", 12),
         )
         with self._lock:
             self._sessions[session_id] = session

@@ -31,8 +31,8 @@ session:
 heartbeat:
   riot_timeout_ms: 3000          # 3 segundos (más rápido)
   waning_threshold_sec: 240      # 4 minutos (antes de VAL 5)
-  interval_ms: 15000             # 15 segundos (más frecuente)
-  jitter_max_ms: 1000            # 1 segundo jitter
+  interval_ms: 10000             # 10 segundos (para prevenir desincronización de token en cola)
+  jitter_max_ms: 500             # 0.5 segundos jitter
 
 paths:
   event_log_dir: "logs/sessions"
@@ -48,8 +48,8 @@ wine:
 gateway:
   region: "la"
   vanguard_ua: "vanguard/1.18.3-74+20260623.212037"
-  build_branch: "release-13.02-shipping-7-5092570"
-  build_changelist: 5092570
+  build_branch: "release-13.02-shipping-10-5229475"
+  build_changelist: 5229475
 
 stealth:
   hwid_rotation: true

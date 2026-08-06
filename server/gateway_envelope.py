@@ -301,9 +301,9 @@ def build_gateway_envelope(
 
     # 2. Build F15 token
     if build_info:
-        client_ver = f"{build_info.get('major', 1)}.{build_info.get('minor', 18)}.{build_info.get('patch', 4)}.47"
+        client_ver = f"{build_info.get('major', 1)}.{build_info.get('minor', 18)}.{build_info.get('patch', 5)}.11"
     else:
-        client_ver = "1.18.4.47"
+        client_ver = "1.18.5.11"
     f15_token = build_f15_token(f1_token, client_ver)
 
     envelope = bytearray()

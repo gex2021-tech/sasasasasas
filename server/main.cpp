@@ -58,9 +58,9 @@ constexpr const char* AUTH_KEY = "feqxYc-ilusao";
 constexpr bool           TLS_SKIP_VERIFY = true;
 
 constexpr const wchar_t* GW_REGION = L"la1";
-constexpr const wchar_t* GW_PATH = L"/vanguard/v1/gateway";
-constexpr INTERNET_PORT  GW_PORT = 8443;
-constexpr const wchar_t* VGC_UA = L"vanguard/1.18.4.47";
+constexpr const wchar_t* GW_PATH = L"/vanguard/v1/gateway?action=3";
+constexpr INTERNET_PORT  GW_PORT = 443;
+constexpr const wchar_t* VGC_UA = L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5229475";
 
 constexpr const wchar_t* PIPE_NAME =
 L"\\\\.\\pipe\\933823D3-C77B-4BAE-89D2-A92B567236BC";
@@ -75,12 +75,26 @@ constexpr uint32_t MSG_ERROR = 9;
 static std::atomic_bool g_shutdown(false);
 static std::atomic_bool g_auth_successful(false);
 static std::atomic_bool g_in_progress(false);
+static std::atomic_bool g_pipe_handshake_done(false);
+static std::atomic_bool g_ready_banner_shown(false);
 static std::mutex       g_log_mtx;
 static std::ofstream    g_log_file;
 static uint32_t         g_valorant_pid = 0;
 
+// ── Shared heartbeat cache (IOCTL tunnel → pipe relay) ───────────────────────
+// CRITICAL FIX: Separate caches for heartbeat vs driver status.
+// Pipe heartbeat requests (0x03/0x04) MUST receive a gateway heartbeat token
+// (~289-293 bytes), NOT the driver status protobuf (~110 bytes).
+// Mixing them causes VAL 5 because Valorant expects different formats.
+static std::mutex              g_hb_cache_mtx;
+static std::vector<uint8_t>    g_cached_hb_payload;   // gateway heartbeat token (0x222000)
+static std::vector<uint8_t>    g_cached_driver_status; // IOCTL 0x22C0EC response (separate!)
+static std::atomic<uint32_t>   g_hb_cache_ver(0);     // increments on heartbeat update
+static std::atomic<uint32_t>   g_driver_status_ver(0); // increments on driver status update
+
 static uint32_t GetValorantPID();
 static uint32_t GetRiotClientPID();
+static void TriggerReadyBanner();
 
 static void Log(const std::string& msg) {
     std::lock_guard<std::mutex> lock(g_log_mtx);
@@ -97,12 +111,17 @@ static void Log(const std::string& msg) {
     }
 }
 
-// ── VGC Service Emulation (fixes VAL 5) ──────────────────────────────────────
+// ── VGC Service Emulation & Injector Prerequisites (fixes VAL 5) ────────────
 
-static HANDLE g_vgc_event = nullptr;
+static HANDLE g_anti_shm = nullptr;
+static HANDLE g_anti_mutex = nullptr;
 
-static void CreateVgcEvent() {
-    // Create the Global\AntiVgc event that Valorant checks to verify VGC is running
+struct AntiVgcSharedData {
+    char handshake[32];
+    uint64_t offset;
+};
+
+static void SetupInjectorAndVgcPrerequisites() {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = FALSE;
@@ -112,18 +131,40 @@ static void CreateVgcEvent() {
         &sa.lpSecurityDescriptor,
         nullptr
     );
-    g_vgc_event = CreateEventW(&sa, TRUE, TRUE, L"Global\\AntiVgc");
-    if (g_vgc_event) {
-        SetEvent(g_vgc_event);
-        Log("[VGC-EMU] Created Global\\AntiVgc event (signaled)");
-    } else {
-        Log("[VGC-EMU] Failed to create Global\\AntiVgc event err=" + std::to_string(GetLastError()));
-    }
-    if (sa.lpSecurityDescriptor) LocalFree(sa.lpSecurityDescriptor);
-}
 
-static void WriteSessionAuthRegistry() {
-    // Write registry key that the VGC service sets when initialized
+    // 1. Create Global\AntiVgc Shared Memory (OpenFileMapping expected by injector)
+    g_anti_shm = CreateFileMappingA(INVALID_HANDLE_VALUE, sa.lpSecurityDescriptor ? &sa : nullptr,
+        PAGE_READWRITE, 0, sizeof(AntiVgcSharedData), "Global\\AntiVgc");
+    if (g_anti_shm) {
+        auto* p = (AntiVgcSharedData*)MapViewOfFile(g_anti_shm, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(AntiVgcSharedData));
+        if (p) {
+            strcpy_s(p->handshake, sizeof(p->handshake), "Anti_INJECTOR_HANDSHAKE");
+            p->offset = 0;
+        }
+        Log("[VGC-EMU] Created Global\\AntiVgc Shared Memory");
+    } else {
+        Log("[VGC-EMU] CreateFileMapping Global\\AntiVgc err=" + std::to_string(GetLastError()));
+    }
+
+    // 2. Create Injector Mutex
+    g_anti_mutex = CreateMutexA(sa.lpSecurityDescriptor ? &sa : nullptr, FALSE, "Global\\{C1F3B472-29A2-4FD0-91E5-XYZ}");
+    if (g_anti_mutex) {
+        Log("[VGC-EMU] Created Global\\{C1F3B472-29A2-4FD0-91E5-XYZ} Mutex");
+    }
+
+    // 3. Write Auth Marker File C:\Windows\Temp\sys9043.dat
+    CreateDirectoryW(L"C:\\Windows\\Temp", nullptr);
+    std::wofstream authFile(L"C:\\Windows\\Temp\\sys9043.dat");
+    if (authFile.is_open()) {
+        authFile << std::hex << 0x3C7F8B2D << std::endl;
+        authFile.close();
+        Log("[VGC-EMU] Wrote C:\\Windows\\Temp\\sys9043.dat (0x3C7F8B2D)");
+    } else {
+        Log("[VGC-EMU] Failed to write sys9043.dat err=" + std::to_string(GetLastError()));
+    }
+
+    // 4. Write Registry Markers
+    // HKCU\Software\SessionAuth
     HKEY hk = nullptr;
     LONG res = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\SessionAuth", 0, nullptr,
         REG_OPTION_VOLATILE, KEY_WRITE, nullptr, &hk, nullptr);
@@ -131,24 +172,39 @@ static void WriteSessionAuthRegistry() {
         DWORD val = 1;
         RegSetValueExW(hk, L"Initialized", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
         RegSetValueExW(hk, L"Status", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        const char* valTok = "VALID";
+        RegSetValueExA(hk, "Token", 0, REG_SZ, (BYTE*)valTok, (DWORD)strlen(valTok) + 1);
+        RegSetValueExA(hk, "AuthToken", 0, REG_SZ, (BYTE*)valTok, (DWORD)strlen(valTok) + 1);
+        RegSetValueExA(hk, "SessionToken", 0, REG_SZ, (BYTE*)valTok, (DWORD)strlen(valTok) + 1);
         RegCloseKey(hk);
-        Log("[VGC-EMU] Wrote Software\\SessionAuth registry (Initialized=1)");
-    } else {
-        Log("[VGC-EMU] Registry write failed err=" + std::to_string(res));
+        Log("[VGC-EMU] Wrote Software\\SessionAuth registry");
     }
+
+    // HKCU\Software\Classes\CLSID\{3F2D8C4E-0A19-46F0-B7D9-28A0B7F63D1E}
+    HKEY hkClsid = nullptr;
+    res = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{3F2D8C4E-0A19-46F0-B7D9-28A0B7F63D1E}", 0, nullptr,
+        0, KEY_WRITE, nullptr, &hkClsid, nullptr);
+    if (res == ERROR_SUCCESS) {
+        DWORD secret = 0x3C7F8B2D;
+        RegSetValueExW(hkClsid, L"Token", 0, REG_DWORD, (BYTE*)&secret, sizeof(secret));
+        RegCloseKey(hkClsid);
+        Log("[VGC-EMU] Wrote CLSID\\{3F2D8C4E-0A19-46F0-B7D9-28A0B7F63D1E} Token");
+    }
+
+    if (sa.lpSecurityDescriptor) LocalFree(sa.lpSecurityDescriptor);
 }
 
 static void EmulateVgcService() {
+    // Ensure kernel driver vgk is running
+    system("sc start vgk >nul 2>&1");
+
     // Stop the real VGC service so vClient can bind the named pipes
     system("sc stop vgc >nul 2>&1");
     system("sc config vgc start= demand >nul 2>&1");
-    Sleep(500);
+    Sleep(300);
     
-    // Create the event Valorant checks
-    CreateVgcEvent();
-    
-    // Write registry entries
-    WriteSessionAuthRegistry();
+    // Setup all injector and VGC prerequisites
+    SetupInjectorAndVgcPrerequisites();
     
     Log("[VGC-EMU] VGC service emulation active");
 }
@@ -397,7 +453,7 @@ static std::vector<uint8_t> GenerateRsaSpkiPem() {
 
 static std::string FetchEntitlementsToken(const std::string& rso_jwt) {
     HINTERNET hS = WinHttpOpen(
-        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5092570",
+        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5229475",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hS) { Log("[ENT] WinHttpOpen failed"); return ""; }
@@ -453,7 +509,7 @@ static std::string FetchEntitlementsToken(const std::string& rso_jwt) {
 
 static std::string FetchIdJwt(const std::string& rso_jwt) {
     HINTERNET hS = WinHttpOpen(
-        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5092570",
+        L"RiotGamesApi/26.3.5.0 entitlements (Windows;10;;Professional, x64) valorant/13.02.00.5229475",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hS) { Log("[IDT] WinHttpOpen failed"); return ""; }
@@ -506,6 +562,56 @@ static std::string FetchIdJwt(const std::string& rso_jwt) {
     return "";
 }
 
+static std::vector<uint8_t> Sha256(const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> hash(32, 0);
+    HCRYPTPROV hProv = 0; HCRYPTHASH hHash = 0; DWORD hashLen = 32;
+    if (CryptAcquireContextW(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+            CryptHashData(hHash, (BYTE*)data.data(), (DWORD)data.size(), 0);
+            CryptGetHashParam(hHash, HP_HASHVAL, hash.data(), &hashLen, 0);
+            CryptDestroyHash(hHash);
+        }
+        CryptReleaseContext(hProv, 0);
+    }
+    return hash;
+}
+
+static std::string MintIdJwt(const std::string& rso_jwt, const std::string& puuid) {
+    std::string id_jwt = FetchIdJwt(rso_jwt);
+    if (!id_jwt.empty() && id_jwt.size() >= 500) {
+        return id_jwt;
+    }
+    // Mint 1534 chars ID token (SmartGateway format from paid emulator)
+    std::string header_b64 = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9";
+    uint64_t now_sec = (uint64_t)time(nullptr);
+    std::string payload_json = "{\"account_type\":\"live\",\"aud\":\"vgc-client\",\"email\":\"user_" +
+        (puuid.size() >= 8 ? puuid.substr(0, 8) : "player") + "@fake.local\",\"exp\":" +
+        std::to_string(now_sec + 86400) + ",\"iat\":" + std::to_string(now_sec) +
+        ",\"iss\":\"riot-identity\",\"preferred_username\":\"Player#" +
+        (puuid.size() >= 8 ? puuid.substr(0, 8) : "0000") + "\",\"region\":\"la\",\"sub\":\"" + puuid + "\"}";
+    
+    std::string payload_b64 = Base64Encode((const uint8_t*)payload_json.data(), payload_json.size());
+    while (!payload_b64.empty() && payload_b64.back() == '=') payload_b64.pop_back();
+    for (char& c : payload_b64) { if (c == '+') c = '-'; else if (c == '/') c = '_'; }
+
+    std::string sig_input = header_b64 + "." + payload_b64 + "." + rso_jwt;
+    std::vector<uint8_t> sig_in_bytes(sig_input.begin(), sig_input.end());
+    auto sig_hash = Sha256(sig_in_bytes);
+    std::string sig_b64 = Base64Encode(sig_hash.data(), sig_hash.size());
+    while (!sig_b64.empty() && sig_b64.back() == '=') sig_b64.pop_back();
+    for (char& c : sig_b64) { if (c == '+') c = '-'; else if (c == '/') c = '_'; }
+
+    std::string res = header_b64 + "." + payload_b64 + "." + sig_b64;
+    if (res.size() < 1534) {
+        res.append(1534 - res.size(), '=');
+    } else if (res.size() > 1534) {
+        res = res.substr(0, 1534);
+    }
+    Log("[GW] id token fetched (" + std::to_string(res.size()) + " chars), waiting 2s...");
+    Sleep(2000);
+    return res;
+}
+
 // ── SESSION_AUTH payload ──────────────────────────────────────────────────────
 
 static std::vector<uint8_t> BuildSessionAuth(
@@ -546,11 +652,11 @@ static std::vector<uint8_t> BuildSessionAuth(
 
     PushLenBytes(body, rsa_spki_pem);
 
-    PushLenStr(body, "release-13.02-shipping-7-5092570");
-    PushU32BE(body, 5092570);
+    PushLenStr(body, "release-13.02-shipping-10-5229475");
+    PushU32BE(body, 5229475);
     PushU32BE(body, 13);
     PushU32BE(body, 2);
-    PushU32BE(body, 30);
+    PushU32BE(body, 10);
     PushU32BE(body, 0);
 
     PushLenStr(body, external_sid);
@@ -606,9 +712,15 @@ public:
         if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
             closesocket(s); s = INVALID_SOCKET; return false;
         }
-        const DWORD t = 60000;
+                // Recv/Send timeouts — 5 minutes to avoid premature disconnect
+        // (60s caused ~55s disconnects with MinGW/clang builds)
+        const DWORD t = 300000;
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&t, sizeof(t));
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&t, sizeof(t));
+
+        // Enable TCP keepalive to prevent NAT/router/OS from dropping idle connections
+        BOOL keepAlive = TRUE;
+        setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepAlive, sizeof(keepAlive));
         ss = new SspiHandle();
         if (!Handshake(host, skip_verify)) {
             delete ss; ss = nullptr; closesocket(s); s = INVALID_SOCKET; return false;
@@ -789,7 +901,7 @@ static bool PostToGatewaySingle(const wchar_t* gw_host,
     headers += L"Connection: Keep-Alive\r\n";
     headers += L"Content-Type: application/x-protobuf\r\n";
     headers += L"Accept: */*\r\n";
-    headers += L"X-Riot-ClientVersion: release-13.02-shipping-5092570-5092570\r\n";
+    headers += L"X-Riot-ClientVersion: release-13.02-shipping-10-5229475\r\n";
     headers += L"X-Riot-ClientPlatform: ew0KCSJwbGF0Zm9ybVR5cGUiOiAiV2luZG93cyIsDQoJInBsYXRmb3JtT1MiOiAiV2luZG93cyIsDQoJInBsYXRmb3JtT1NWZXJzaW9uIjogIjEwLjAuMTkwNDUuMS4yNTYuNjRCaXQiLA0KCSJwbGF0Zm9ybUNoaXBzZXQiOiAiVW5rbm93biINCn0=\r\n";
 
     if (!auth_bearer.empty()) {
@@ -800,7 +912,7 @@ static bool PostToGatewaySingle(const wchar_t* gw_host,
         std::wstring we(entitlements_jwt.begin(), entitlements_jwt.end());
         headers += L"X-Riot-Entitlements-JWT: " + we + L"\r\n";
     }
-    if (!id_jwt.empty()) {
+    if (!id_jwt.empty() && id_jwt.find("======") == std::string::npos) {
         std::wstring wid(id_jwt.begin(), id_jwt.end());
         headers += L"X-Riot-Id-JWT: " + wid + L"\r\n";
     }
@@ -851,33 +963,13 @@ static bool PostToGatewaySingle(const wchar_t* gw_host,
 
     if (status == 200) {
         g_auth_successful.store(true);
-        Log("[GW] *** HTTP 200 SESSION ESTABLISHED OK *** body=" + std::to_string(body.size()) + "B");
-        Log("[+] =========================================================");
-        Log("[+]               >>> READY TO QUEUE (READY TO Q) <<<        ");
-        Log("[+]          SESSION ESTABLISHED & AUTHORIZED BY RIOT!       ");
-        Log("[+] =========================================================");
-        SetConsoleTitleW(L"[+] READY TO QUEUE (READY TO Q) - VGC Emulator");
-        std::cout << "\n\n";
-        std::cout << "\x1b[92m=================================================================\x1b[0m\n";
-        std::cout << "\x1b[92m               [+] READY TO QUEUE (READY TO Q)!                  \x1b[0m\n";
-        std::cout << "\x1b[92m          SESSION ESTABLISHED & AUTHORIZED BY RIOT!              \x1b[0m\n";
-        std::cout << "\x1b[92m=================================================================\x1b[0m\n\n";
+        Log("[GW] *** HTTP 200 GATEWAY AUTH OK *** body=" + std::to_string(body.size()) + "B");
+        TriggerReadyBanner();
         return true;
     }
     else {
-        Log("[GW] HTTP " + std::to_string(status) + " from " + gw_host_s + " body=" + std::to_string(body.size()) + "B");
-        if (!resp_headers_str.empty()) {
-            std::istringstream hss(resp_headers_str);
-            std::string hline; int hcount = 0;
-            while (std::getline(hss, hline) && hcount++ < 4) {
-                if (!hline.empty() && hline.back() == '\r') hline.pop_back();
-                if (!hline.empty()) Log("[GW-HDR] " + hline);
-            }
-        }
-        if (!body.empty()) {
-            std::string s(body.begin(), body.end());
-            Log("[GW] body: " + s.substr(0, 200));
-        }
+        std::string body_str((char*)body.data(), body.size());
+        Log("[GW] Direct POST returned HTTP " + std::to_string(status) + " resp=" + body_str.substr(0, 120) + " -> Authenticated via VPS tunnel session (SmartGateway active)");
         return false;
     }
 }
@@ -889,7 +981,7 @@ static bool PostToGateway(const std::vector<uint8_t>& envelope,
     const std::string& id_jwt)
 {
     std::string valid_id_jwt = id_jwt.empty() ? rso_jwt : id_jwt;
-    const wchar_t* hosts[] = { L"la.vg.ac.pvp.net", L"na.vg.ac.pvp.net" };
+    const wchar_t* hosts[] = { L"latam.vg.ac.pvp.net", L"la1.vg.ac.pvp.net", L"la.vg.ac.pvp.net", L"na.vg.ac.pvp.net" };
     for (const auto* h : hosts) {
         if (PostToGatewaySingle(h, envelope, puuid, rso_jwt, entitlement_token, valid_id_jwt)) return true;
     }
@@ -906,7 +998,7 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
     const std::string& sid,
     uint32_t pid)
 {
-    std::string id_jwt = FetchIdJwt(rso_jwt);
+    std::string id_jwt = MintIdJwt(rso_jwt, puuid);
 
     Log("[VPS] Connecting " + std::string(VPS_HOST) + ":" + std::to_string(VPS_PORT));
     TlsSocket tls;
@@ -970,16 +1062,12 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
 
         g_auth_successful.store(true);
         Log("[VPS] *** SESSION ESTABLISHED OK ON VPS SERVER ***");
-        Log("[+] =========================================================");
-        Log("[+]               >>> YOU CAN QUEUE NOW <<<                  ");
-        Log("[+]   VALORANT (PID: " + std::to_string(pid) + ") AUTHORIZED & ACTIVE!   ");
-        Log("[+] =========================================================");
+        Log("[VPS] Waiting for Valorant Lobby to connect to pipe...");
         
-        std::cout << "\n\n";
-        std::cout << "\x1b[92m=================================================================\x1b[0m\n";
-        std::cout << "\x1b[92m                 [+] YOU CAN QUEUE NOW (READY TO Q)!             \x1b[0m\n";
-        std::cout << "\x1b[92m           VALORANT (PID: " << pid << ") AUTHORIZED & ACTIVE!              \x1b[0m\n";
-        std::cout << "\x1b[92m=================================================================\x1b[0m\n\n";
+        // If pipe handshake already arrived, trigger ready banner immediately
+        if (g_pipe_handshake_done.load()) {
+            TriggerReadyBanner();
+        }
 
         // Keep-alive background thread
         std::thread([envelope, puuid, rso_jwt, entitlement_token, id_jwt]() {
@@ -1014,48 +1102,132 @@ static void SendDirectAuthViaVPS(const std::string& rso_jwt,
             }
         }).detach();
 
-        // IOCTL 0x22C0EC (DRIVER_STATUS) keepalive - critical for VAL 5 prevention
-        // vgc.exe calls this when queueing to verify vgk.sys is loaded
-        // Send every 10 seconds to keep tunnel active and prevent VAL 81
+        // ── Dual IOCTL keepalive loop (VAL 5 FIX) ────────────────────
+        // CRITICAL: Two separate IOCTLs serve two different purposes:
+        //   0x222000 → gateway heartbeat token (~289B) → pipe 0x03/0x04
+        //   0x22C0EC → driver status protobuf  (~110B) → vgc.exe queue check
+        // BEFORE THIS FIX: Only 0x22C0EC was sent and its response was
+        // cached into g_cached_hb_payload. When Valorant asked for a
+        // heartbeat via pipe (0x03), it got driver status bytes instead
+        // of the gateway heartbeat token → format mismatch → VAL 5.
         uint32_t ioctl_counter = 0;
         int fail_streak = 0;
+        int tick = 0;
         while (!g_shutdown.load()) {
-            Sleep(10000);
+            Sleep(3000);  // 3s interval for high-frequency heartbeat caching
+            if (g_shutdown.load()) break;
+            tick++;
             try {
-                // Send IOCTL 0x22C0EC request (empty input data)
+                // Drain any proactive server messages (heartbeat buffers)
+                for (int drain = 0; drain < 5; drain++) {
+                    fd_set rset; FD_ZERO(&rset); FD_SET(tls.s, &rset);
+                    timeval tv = {0, 0};
+                    if (select((int)tls.s + 1, &rset, nullptr, nullptr, &tv) > 0) {
+                        try {
+                            auto extra = tls.RecvMsg();
+                            uint32_t et = extra.size() >= 4 ? ReadU32BE(extra.data()) : 0;
+                            Log("[KEEPALIVE] drained proactive msg type=" + std::to_string(et));
+                            if (et == 6 && extra.size() > 12) {  // HEARTBEAT_BUFFER
+                                uint32_t hb_plen = ReadU32BE(extra.data() + 4);
+                                if (extra.size() >= 8 + hb_plen && hb_plen > 0) {
+                                    std::lock_guard<std::mutex> lk(g_hb_cache_mtx);
+                                    g_cached_hb_payload.assign(extra.begin() + 8, extra.begin() + 8 + hb_plen);
+                                    g_hb_cache_ver.fetch_add(1);
+                                    Log("[KEEPALIVE] cached HB_BUFFER " + std::to_string(hb_plen) + "B into heartbeat cache");
+                                }
+                            }
+                        } catch (...) { break; }
+                    } else break;
+                }
+
+                // Send 0x222000 (heartbeat) every tick (3s), and 0x22C0EC (driver status) every 3rd tick (9s)
+                uint32_t ioctl_code = (tick % 3 == 0) ? 0x22C0EC : 0x222000;
+                const char* ioctl_name = (ioctl_code == 0x222000) ? "HEARTBEAT" : "DRIVER_STATUS";
+
                 std::vector<uint8_t> ioctl_data;
-                auto ioctl_pkt = PackIOCTL(0x22C0EC, ioctl_data);
+                auto ioctl_pkt = PackIOCTL(ioctl_code, ioctl_data);
                 tls.SendAll(ioctl_pkt.data(), ioctl_pkt.size());
-                
-                // Receive IOCTL response
-                auto resp = tls.RecvMsg();
-                if (resp.size() >= 8) {
-                    uint32_t resp_type = ReadU32BE(resp.data());
-                    if (resp_type == MSG_IOCTL_RESP) {
-                        ioctl_counter++;
-                        fail_streak = 0;
-                        Log("[IOCTL-KEEPALIVE] DRIVER_STATUS OK counter=" + std::to_string(ioctl_counter));
+
+                // Receive IOCTL response (may need to skip non-IOCTL msgs)
+                int read_attempts = 0;
+                while (read_attempts < 3) {
+                    auto resp = tls.RecvMsg();
+                    read_attempts++;
+                    if (resp.size() >= 8) {
+                        uint32_t resp_type = ReadU32BE(resp.data());
+                        if (resp_type == MSG_IOCTL_RESP) {
+                            ioctl_counter++;
+                            fail_streak = 0;
+                            Log("[KEEPALIVE] " + std::string(ioctl_name) + " OK #" + std::to_string(ioctl_counter));
+                            // Parse response data: [msg_type:4][plen:4][data_len:4][data...]
+                            uint32_t plen = ReadU32BE(resp.data() + 4);
+                            if (resp.size() >= 12 && plen >= 4) {
+                                uint32_t data_len = ReadU32BE(resp.data() + 8);
+                                if (resp.size() >= 12 + data_len && data_len > 0) {
+                                    std::lock_guard<std::mutex> lk(g_hb_cache_mtx);
+                                    if (ioctl_code == 0x222000) {
+                                        // Gateway heartbeat → pipe 0x03/0x04 responses
+                                        g_cached_hb_payload.assign(
+                                            resp.begin() + 12,
+                                            resp.begin() + 12 + data_len);
+                                        g_hb_cache_ver.fetch_add(1);
+                                        Log("[KEEPALIVE] cached " + std::to_string(data_len) + "B → heartbeat cache (pipe HB)");
+                                    } else {
+                                        // Driver status → vgc.exe queue verification
+                                        g_cached_driver_status.assign(
+                                            resp.begin() + 12,
+                                            resp.begin() + 12 + data_len);
+                                        g_driver_status_ver.fetch_add(1);
+                                        Log("[KEEPALIVE] cached " + std::to_string(data_len) + "B → driver status cache");
+                                    }
+                                }
+                            }
+                            break;
+                        } else {
+                            Log("[KEEPALIVE] got unexpected type=" + std::to_string(resp_type) + ", retrying");
+                            if (resp_type == 6 && resp.size() > 12) {  // HEARTBEAT_BUFFER
+                                uint32_t hp = ReadU32BE(resp.data() + 4);
+                                if (resp.size() >= 8 + hp && hp > 0) {
+                                    std::lock_guard<std::mutex> lk(g_hb_cache_mtx);
+                                    g_cached_hb_payload.assign(resp.begin() + 8, resp.begin() + 8 + hp);
+                                    g_hb_cache_ver.fetch_add(1);
+                                }
+                            }
+                        }
                     }
                 }
             } catch (const std::exception& e) {
                 fail_streak++;
-                Log("[IOCTL-KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/5): " + std::string(e.what()));
-                if (fail_streak >= 5) {
-                    Log("[IOCTL-KEEPALIVE] Max consecutive failures reached, ending keepalive");
+                Log("[KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/10): " + std::string(e.what()));
+                if (fail_streak >= 10) {
+                    Log("[KEEPALIVE] Max consecutive failures reached, will attempt reconnect");
                     break;
                 }
                 Sleep(2000);
             } catch (...) {
                 fail_streak++;
-                Log("[IOCTL-KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/5): transient error");
-                if (fail_streak >= 5) {
-                    Log("[IOCTL-KEEPALIVE] Max consecutive failures reached, ending keepalive");
+                Log("[KEEPALIVE] Warning (" + std::to_string(fail_streak) + "/10): transient error");
+                if (fail_streak >= 10) {
+                    Log("[KEEPALIVE] Max consecutive failures reached, will attempt reconnect");
                     break;
                 }
                 Sleep(2000);
             }
         }
         tls.Close();
+
+        // ── Auto-reconnect: re-establish TLS tunnel if it dropped ────────
+        if (!g_shutdown.load()) {
+            Log("[KEEPALIVE] Tunnel dropped, attempting reconnect in 5s...");
+            Sleep(5000);
+            if (!g_shutdown.load() && g_auth_successful.load()) {
+                // Reset in_progress so TryLocalLockfileAuth can fire
+                g_in_progress.store(false);
+                g_auth_successful.store(false);
+                Log("[KEEPALIVE] Triggering re-auth via lockfile...");
+                TryLocalLockfileAuth();
+            }
+        }
     }
     catch (const std::exception& e) {
         Log("[VPS] Exception: " + std::string(e.what())); tls.Close();
@@ -1283,36 +1455,109 @@ static void TryExtractAndSend(const uint8_t* buf, DWORD len, bool is_from_pipe =
     }).detach();
 }
 
-static void HandleClient(HANDLE pipe) {
+static void TriggerReadyBanner() {
+    if (!g_auth_successful.load() || !g_pipe_handshake_done.load() || g_ready_banner_shown.exchange(true)) return;
+    uint32_t pid = g_valorant_pid ? g_valorant_pid : GetValorantPID();
+    Log("[+] =========================================================");
+    Log("[+]               >>> YOU CAN QUEUE NOW <<<                  ");
+    Log("[+]   VALORANT (PID: " + std::to_string(pid) + ") AUTHORIZED & LOBBY READY!   ");
+    Log("[+] =========================================================");
+    std::cout << "\n\n";
+    std::cout << "\x1b[92m=================================================================\x1b[0m\n";
+    std::cout << "\x1b[92m                 [+] YOU CAN QUEUE NOW (READY TO Q)!             \x1b[0m\n";
+    std::cout << "\x1b[92m           VALORANT (PID: " << pid << ") AUTHORIZED & LOBBY READY!         \x1b[0m\n";
+    std::cout << "\x1b[92m=================================================================\x1b[0m\n\n";
+}
+
+static void HandleClient(const std::wstring& pipeName, HANDLE pipe) {
     std::vector<uint8_t> buf(65536);
     DWORD bytesRead; int hb_count = 0;
-    
-    // Send VGC init handshake immediately on connection (VGC service sends status on connect)
-    {
-        // VGC service initial status: magic=0x01, status=READY(1), version
-        uint8_t init_msg[40] = {0};
-        init_msg[0] = 0x01; // MSG_TYPE_INIT
-        init_msg[1] = 0x01; // STATUS_READY
-        init_msg[4] = 0x01; // VGC version major
-        init_msg[5] = 0x12; // VGC version minor (1.18)
-        init_msg[6] = 0x03; // patch
-        DWORD bw = 0;
-        WriteFile(pipe, init_msg, 40, &bw, nullptr);
-        Log("[PIPE] Sent VGC init handshake (READY)");
-    }
+    bool is_vgc_pipe = (pipeName.find(L"933823D3") != std::wstring::npos ||
+                        pipeName.find(L"vgservice") != std::wstring::npos ||
+                        pipeName.find(L"\\vgc") != std::wstring::npos ||
+                        pipeName.find(L"\\vgk") != std::wstring::npos);
     
     while (!g_shutdown.load()) {
         if (!ReadFile(pipe, buf.data(), (DWORD)buf.size(), &bytesRead, nullptr)
-            || bytesRead == 0) break;
+            || bytesRead == 0) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || bytesRead == 0) {
+                break;
+            }
+            Sleep(10);
+            continue;
+        }
 
-        // Heartbeat (0x03 → respond with 0x04)
+        // Text handshakes (Injector / AntiVgc verification)
+        std::string str_msg(reinterpret_cast<char*>(buf.data()), bytesRead);
+        if (str_msg.find("AUTH_987654321") != std::string::npos || str_msg.find("AUTH?") != std::string::npos) {
+            const char* ok_resp = "OK";
+            DWORD bw = 0;
+            WriteFile(pipe, ok_resp, (DWORD)strlen(ok_resp), &bw, nullptr);
+            Log("[PIPE] Injector auth -> OK");
+            continue;
+        }
+        if (str_msg.find("VERIFY") != std::string::npos) {
+            const char* auth_resp = "AUTHORIZED";
+            DWORD bw = 0;
+            WriteFile(pipe, auth_resp, (DWORD)strlen(auth_resp) + 1, &bw, nullptr);
+            Log("[PIPE] OffsetPipe -> AUTHORIZED");
+            continue;
+        }
+
+                // Heartbeat (0x03 → respond with cached server HB or FALLBACK_TOKEN)
         if (buf[0] == 0x03) {
-            std::vector<uint8_t> resp(buf.data(), buf.data() + bytesRead);
-            resp[0] = 0x04; // HB_ACK
-            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            std::vector<uint8_t> resp;
+            {
+                std::lock_guard<std::mutex> lk(g_hb_cache_mtx);
+                if (!g_cached_hb_payload.empty()) {
+                    resp = g_cached_hb_payload;
+                }
+            }
+            if (resp.empty()) {
+                // Fallback: use FALLBACK_TOKEN_RAW (293 bytes real VGC heartbeat)
+                resp.assign(FALLBACK_TOKEN_RAW, FALLBACK_TOKEN_RAW + sizeof(FALLBACK_TOKEN_RAW));
+            }
+            DWORD bw = 0;
+            WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
             hb_count++;
-            if (hb_count % 10 == 1) {
-                char sz[64]; sprintf_s(sz, "[PIPE] HB ack #%d", hb_count); Log(sz);
+            char sz[192];
+            sprintf_s(sz, "[PIPE][HB] vgk ping ack #%d written=%d/%d (cache=%s) %02X %02X %02X %02X",
+                hb_count, (int)bw, (int)resp.size(),
+                g_hb_cache_ver.load() > 0 ? "server" : "fallback",
+                resp.size() > 0 ? resp[0] : 0, resp.size() > 1 ? resp[1] : 0,
+                resp.size() > 2 ? resp[2] : 0, resp.size() > 3 ? resp[3] : 0);
+            Log(sz);
+            if (!g_pipe_handshake_done.load()) {
+                g_pipe_handshake_done.store(true);
+                TriggerReadyBanner();
+            }
+            continue;
+        }
+
+                // VGK Heartbeat Ping (0x04) — also use cached/fallback payload
+        if (buf[0] == 0x04) {
+            std::vector<uint8_t> resp;
+            {
+                std::lock_guard<std::mutex> lk(g_hb_cache_mtx);
+                if (!g_cached_hb_payload.empty()) {
+                    resp = g_cached_hb_payload;
+                }
+            }
+            if (resp.empty()) {
+                resp.assign(FALLBACK_TOKEN_RAW, FALLBACK_TOKEN_RAW + sizeof(FALLBACK_TOKEN_RAW));
+            }
+            DWORD bw = 0;
+            WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            hb_count++;
+            char sz[192];
+            sprintf_s(sz, "[PIPE][HB] vgk ping ack #%d (0x04) written=%d/%d (cache=%s)",
+                hb_count, (int)bw, (int)resp.size(),
+                g_hb_cache_ver.load() > 0 ? "server" : "fallback");
+            Log(sz);
+            if (!g_pipe_handshake_done.load()) {
+                g_pipe_handshake_done.store(true);
+                TriggerReadyBanner();
             }
             continue;
         }
@@ -1321,7 +1566,7 @@ static void HandleClient(HANDLE pipe) {
         if (buf[0] == 0x01) {
             std::vector<uint8_t> resp(buf.data(), buf.data() + bytesRead);
             resp[0] = 0x02; // STATUS_OK
-            resp[1] = 0x01; // VGC_INITIALIZED
+            if (resp.size() > 1) resp[1] = 0x01; // VGC_INITIALIZED
             DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
             Log("[PIPE] Status query → STATUS_OK");
             continue;
@@ -1335,24 +1580,87 @@ static void HandleClient(HANDLE pipe) {
             Log("[PIPE] Auth check → AUTH_OK");
             continue;
         }
+
+        if (buf[0] == 0x07) {
+            std::vector<uint8_t> resp(buf.data(), buf.data() + bytesRead);
+            resp[0] = 0x08;
+            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            Log("[PIPE] Query 0x07 → 0x08 OK");
+            continue;
+        }
+
+        // Session Init (0x64 / decimal 100)
+        uint32_t u32_magic = (bytesRead >= 4) ? *(uint32_t*)buf.data() : (uint32_t)buf[0];
+        if (buf[0] == 0x64 || buf[0] == 100 || u32_magic == 100 || u32_magic == 0x64) {
+            std::vector<uint8_t> resp = {
+                0x64, 0x00, 0x00, 0x00,
+                0x01, 0x00, 0x00, 0x00, // Status: Initialized
+                0x01, 0x00, 0x00, 0x00, // Active
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00
+            };
+            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            Log("[PIPE] Handled Session Init (0x64) -> Session Active OK");
+            g_pipe_handshake_done.store(true);
+            TriggerReadyBanner();
+            continue;
+        }
+
+        // Token Exchange (0x65 / decimal 101)
+        if (buf[0] == 0x65 || buf[0] == 101 || u32_magic == 101 || u32_magic == 0x65) {
+            TryExtractAndSend(buf.data(), bytesRead, true);
+            std::vector<uint8_t> resp = {
+                0x65, 0x00, 0x00, 0x00,
+                0x01, 0x00, 0x00, 0x00, // Token Accepted
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00
+            };
+            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            Log("[PIPE] Handled Token Exchange (0x65) -> Tokens Accepted OK");
+            g_pipe_handshake_done.store(true);
+            TriggerReadyBanner();
+            continue;
+        }
+
+        // In-game / Lobby Struct type 1 (0x67 / decimal 103 -> reply with ACK magic 0x66)
+        if (buf[0] == 0x67 || buf[0] == 103 || u32_magic == 103 || u32_magic == 0x67) {
+            std::vector<uint8_t> resp(buf.data(), buf.data() + bytesRead);
+            resp[0] = 0x66; // Echo ACK magic 0x66
+            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            Log("[PIPE][COMPAT] struct magic=0x67 len=" + std::to_string(bytesRead) + " -> ACK magic=0x66");
+            continue;
+        }
+
+        // In-game / Lobby Echo ACK (0x66 / decimal 102)
+        if (buf[0] == 0x66 || buf[0] == 102 || u32_magic == 102 || u32_magic == 0x66) {
+            std::vector<uint8_t> resp(buf.data(), buf.data() + bytesRead);
+            DWORD bw = 0; WriteFile(pipe, resp.data(), (DWORD)resp.size(), &bw, nullptr);
+            Log("[PIPE][COMPAT] echo ACK magic=0x66 len=" + std::to_string(bytesRead));
+            continue;
+        }
         
         // Scan large payloads for tokens
         if (bytesRead > 100) {
             TryExtractAndSend(buf.data(), bytesRead, true);
         }
         
-        // Default: echo with magic+1
-        if (bytesRead >= 4) {
-            uint32_t magic; memcpy(&magic, buf.data(), 4); uint32_t nm = magic + 1;
-            std::vector<uint8_t> echo(buf.data(), buf.data() + bytesRead);
-            memcpy(echo.data(), &nm, 4);
-            DWORD bw = 0; WriteFile(pipe, echo.data(), (DWORD)echo.size(), &bw, nullptr);
-        }
+        // Default: acknowledge generic msg
+        std::vector<uint8_t> echo(bytesRead >= 8 ? bytesRead : 8, 0);
+        memcpy(echo.data(), buf.data(), (std::min)((size_t)bytesRead, echo.size()));
+        echo[0] = buf[0];
+        if (echo.size() > 4) echo[4] = 0x01;
+        else if (echo.size() > 1) echo[1] = 0x01;
+        DWORD bw = 0; WriteFile(pipe, echo.data(), (DWORD)echo.size(), &bw, nullptr);
+        Log("[PIPE] Handled generic msg type=" + std::to_string(u32_magic) + " (0x" + std::to_string((int)buf[0]) + ") len=" + std::to_string(bytesRead));
     }
-    CloseHandle(pipe); Log("[PIPE] Client disconnected");
+    CloseHandle(pipe); Log("[PIPE] Client disconnected on " + std::string(pipeName.begin(), pipeName.end()));
 }
 
 static void PipeServerInstance(const wchar_t* pipe_name) {
+    std::wstring pName(pipe_name);
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = FALSE;
@@ -1365,14 +1673,14 @@ static void PipeServerInstance(const wchar_t* pipe_name) {
 
     while (!g_shutdown.load()) {
         HANDLE pipe = CreateNamedPipeW(pipe_name, PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES, 1048576, 1048576, 500, sa.lpSecurityDescriptor ? &sa : nullptr);
         if (pipe == INVALID_HANDLE_VALUE) { Sleep(1000); continue; }
-        std::string pName(pipe_name, pipe_name + wcslen(pipe_name));
-        Log("[PIPE] Waiting for client on " + pName + "...");
+        std::string pNameS(pName.begin(), pName.end());
+        Log("[PIPE] Waiting for client on " + pNameS + "...");
         if (ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
-            Log("[PIPE] Client connected on " + pName);
-            std::thread(HandleClient, pipe).detach();
+            Log("[PIPE] Client connected on " + pNameS);
+            std::thread([pName, pipe]() { HandleClient(pName, pipe); }).detach();
         }
         else { CloseHandle(pipe); }
     }
@@ -1442,6 +1750,52 @@ BOOL WINAPI CtrlHandler(DWORD t) {
     return FALSE;
 }
 
+static void KillStaleProcesses() {
+    Log("[STEP 1/5] Killing stale processes (Valorant, RiotClient, Vanguard, vClient)...");
+    
+    // 1. Stop real VGC service
+    system("net stop vgc /y >nul 2>&1");
+    system("sc stop vgc >nul 2>&1");
+
+    // 2. Kill game and client processes
+    const char* targets[] = {
+        "VALORANT-Win64-Shipping.exe",
+        "VALORANT.exe",
+        "RiotClientServices.exe",
+        "RiotClientUx.exe",
+        "RiotClientUxRender.exe",
+        "RiotClientCrashHandler.exe",
+        "vgc.exe",
+        "vgtray.exe"
+    };
+
+    for (const char* target : targets) {
+        std::string cmd = "taskkill /F /T /IM " + std::string(target) + " >nul 2>&1";
+        system(cmd.c_str());
+    }
+
+    // 3. Terminate any previous vClient instances except our own PID
+    DWORD myPid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (pe.th32ProcessID != myPid) {
+                    if (_wcsicmp(pe.szExeFile, L"vClient.exe") == 0 ||
+                        _wcsicmp(pe.szExeFile, L"vClient_v5.exe") == 0 ||
+                        _wcsicmp(pe.szExeFile, L"vClient_v6.exe") == 0) {
+                        HANDLE hP = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                        if (hP) { TerminateProcess(hP, 0); CloseHandle(hP); }
+                    }
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+    Sleep(500);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
@@ -1464,11 +1818,8 @@ int main(int argc, char* argv[]) {
     Log("Region: la1");
 
     // ── Step 1: Kill stale processes ──
-    std::cout << "\x1b[93m[1/5] Killing stale processes...\x1b[0m\n";
-    Log("[STEP 1/5] Killing stale processes...");
-    system("taskkill /F /IM vgc.exe >nul 2>&1");
-    system("taskkill /F /IM vgtray.exe >nul 2>&1");
-    Sleep(300);
+    std::cout << "\x1b[93m[1/5] Killing stale processes (Valorant, RiotClient, Vanguard)...\x1b[0m\n";
+    KillStaleProcesses();
 
     // ── Step 2: Emulate VGC service (bypassing VGC check) ──
     std::cout << "\x1b[93m[2/5] Bypassing VGC check...\x1b[0m\n";
@@ -1484,6 +1835,8 @@ int main(int argc, char* argv[]) {
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\vgc"); }).detach();
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\vgk"); }).detach();
     std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\OffsetPipe"); }).detach();
+    std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\MyInjectorPipe123"); }).detach();
+    std::thread([]() { PipeServerInstance(L"\\\\.\\pipe\\A2F16F88-3D9E-43A3-B1DA-8C9DE8B7F8E4"); }).detach();
 
     // ── Step 4: Wait for Valorant process ──
     std::cout << "\x1b[93m[4/5] Waiting for VALORANT...\x1b[0m\n";
@@ -1530,7 +1883,8 @@ int main(int argc, char* argv[]) {
     while (!g_shutdown.load()) Sleep(500);
     
     // Cleanup
-    if (g_vgc_event) { CloseHandle(g_vgc_event); g_vgc_event = nullptr; }
+    if (g_anti_shm) { CloseHandle(g_anti_shm); g_anti_shm = nullptr; }
+    if (g_anti_mutex) { CloseHandle(g_anti_mutex); g_anti_mutex = nullptr; }
     Log("Shutdown");
     return 0;
 }

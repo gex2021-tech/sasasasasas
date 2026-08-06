@@ -17,17 +17,24 @@ class FallbackCache:
         self._load()
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not self.path.exists():
+                return
+            content = self.path.read_text(encoding="utf-8")
+            raw = json.loads(content)
             self._data = raw if isinstance(raw, dict) else {}
-        except (json.JSONDecodeError, OSError):
+        except Exception:
             self._data = {}
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._data), encoding="utf-8")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Use atomic write via temp file or direct write with error handling
+            with open(str(self.path), "w", encoding="utf-8") as f:
+                json.dump(self._data, f)
+        except Exception:
+            # Non-fatal: in-memory cache remains active even if disk persistence fails
+            pass
 
     def update(self, session_id: str, response: bytes) -> None:
         with self._lock:
@@ -41,4 +48,8 @@ class FallbackCache:
                 return None
             if time.time() - float(entry["ts"]) > self.TTL_SEC:
                 return None
-            return bytes.fromhex(str(entry["hex"]))
+            try:
+                return bytes.fromhex(str(entry["hex"]))
+            except ValueError:
+                return None
+

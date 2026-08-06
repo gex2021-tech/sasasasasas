@@ -1,0 +1,12 @@
+auto_patching_enabled_by_player: false
+locale_data:
+    available_locales:
+    - "en_US"
+    default_locale: "en_US"
+patching_policy: "manual"
+patchline_patching_ask_policy: "ask"
+product_install_full_path: "C:/Program Files/Riot Vanguard"
+product_install_root: "C:/Program Files"
+settings:
+    locale: "en_US"
+should_repair: false

@@ -22,10 +22,26 @@ from .van84_monitor import Van84Monitor
 from .version import PRODUCT_NAME, VERSION
 from .wine_manager import WineManager
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-)
+import atexit
+from datetime import datetime
+from pathlib import Path
+
+# Setup dual logging (Console + Persistent File logs/server.log)
+_log_dir = Path(__file__).resolve().parent.parent / "logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+_log_file = _log_dir / "server.log"
+
+_formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+_file_handler = logging.FileHandler(_log_file, mode="a", encoding="utf-8")
+_file_handler.setFormatter(_formatter)
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(_formatter)
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(_file_handler)
+root_logger.addHandler(_console_handler)
+
 log = logging.getLogger("main")
 
 
@@ -99,15 +115,23 @@ def main() -> None:
     )
 
     def shutdown(*_):
-        log.info("%s V%s shutdown", PRODUCT_NAME, VERSION)
-        session_mgr.stop()
-        van84.stop()
+        log.info("%s V%s shutdown initiated by signal — saving active state and closing sessions", PRODUCT_NAME, VERSION)
+        try:
+            session_mgr.stop()
+            van84.stop()
+        except Exception as e:
+            log.warning("Error during session cleanup: %s", e)
+        log.info("Server stopped cleanly.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except Exception as e:
+        log.critical("Unhandled server exception: %s", e, exc_info=True)
+        shutdown()
 
 
 if __name__ == "__main__":

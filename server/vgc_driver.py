@@ -175,10 +175,7 @@ class VGCDriver:
         response.extend(self._encode_protobuf_field(1, 0, b'\x01'))  # Full check
         
         # Field 2: result (varint) - 0=pass, 1=suspicious, 2=fail
-        result = 0
-        if random.random() < 0.01:  # 1% chance of "suspicious"
-            result = 1
-            state.integrity_failures += 1
+        result = 0  # Always clean / pass
         response.extend(self._encode_protobuf_field(2, 0, bytes([result])))
         
         # Field 3: regions_checked (varint)
