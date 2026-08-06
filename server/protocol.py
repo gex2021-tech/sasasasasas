@@ -161,11 +161,13 @@ class SessionAuthData:
     gpu_brand: str = ""
     gpu_model: str = ""
     cpu_logical_count: int = 0
+    entitlements_token: str = ""
+    id_token: str = ""
 
 
 def _parse_len_prefixed_str(payload: bytes, off: int) -> Tuple[str, int]:
     data, off = _parse_len_prefixed(payload, off)
-    return data.decode("utf-8"), off
+    return data.decode("utf-8", errors="replace"), off
 
 
 def parse_session_auth(payload: bytes) -> SessionAuthData:
@@ -195,6 +197,8 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
     gpu_brand = ""
     gpu_model = ""
     cpu_logical_count = 0
+    entitlements_token = ""
+    id_token = ""
 
     if off + 8 <= len(payload):
         client_ts_ms = struct.unpack_from("!Q", payload, off)[0]
@@ -235,6 +239,10 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
         gpu_model, off = _parse_len_prefixed_str(payload, off)
     if off + 4 <= len(payload):
         cpu_logical_count = struct.unpack_from("!I", payload, off)[0]; off += 4
+    if off < len(payload):
+        entitlements_token, off = _parse_len_prefixed_str(payload, off)
+    if off < len(payload):
+        id_token, off = _parse_len_prefixed_str(payload, off)
 
     return SessionAuthData(
         auth_key=auth_key,
@@ -260,6 +268,8 @@ def parse_session_auth(payload: bytes) -> SessionAuthData:
         gpu_brand=gpu_brand,
         gpu_model=gpu_model,
         cpu_logical_count=cpu_logical_count,
+        entitlements_token=entitlements_token,
+        id_token=id_token,
     )
 
 
