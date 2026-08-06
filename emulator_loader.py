@@ -471,6 +471,102 @@ class EmulatorLoader:
 
         return session_id, ioctl_active, tunnel_active
 
+    def _parse_vclient_log_detailed(self):
+        """Parse vClient.log for heartbeat (0x222000) vs driver status (0x22C0EC).
+        Returns: (session_id, heartbeat_ioctl_ok, driver_status_ok, cache_size, cache_type)
+        """
+        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        if not os.path.exists(log_path):
+            return None, False, False, 0, None
+
+        session_id = None
+        heartbeat_ok = False
+        driver_ok = False
+        cache_size = 0
+        cache_type = None
+
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                lines = f.readlines()
+
+            scan = lines[-100:] if len(lines) > 100 else lines
+            for line in reversed(scan):
+                lu = line.upper()
+                if not session_id:
+                    m = re.search(
+                        r'(?:SESSION_AUTH_OK|SESSION)[=:\s]+'
+                        r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
+                        line, re.IGNORECASE,
+                    )
+                    if m:
+                        session_id = m.group(1)
+
+                if not heartbeat_ok:
+                    if '0X222000' in lu or 'HEARTBEAT' in lu or 'PIPE][HB]' in lu:
+                        if any(ok in lu for ok in ['OK', 'RESP', 'ACK', 'WRITTEN']):
+                            heartbeat_ok = True
+                            size_match = re.search(r'(?:written=|size=)(\d+)', line)
+                            if size_match:
+                                cache_size = int(size_match.group(1))
+                                if cache_size >= 80:
+                                    cache_type = "gateway_token"
+                                else:
+                                    cache_type = "contaminated_driver_status"
+
+                if not driver_ok:
+                    if '0X22C0EC' in lu or 'DRIVER_STATUS' in lu:
+                        if any(ok in lu for ok in ['OK', 'RESP', 'ACK']):
+                            driver_ok = True
+
+                if session_id and heartbeat_ok and driver_ok:
+                    break
+        except Exception as e:
+            print(f"[VGC-EMU] Detailed log parse error: {e}")
+
+        return session_id, heartbeat_ok, driver_ok, cache_size, cache_type
+
+    def _verify_heartbeat_timing(self):
+        """Check that heartbeats are arriving at correct interval (~3s to 10s)."""
+        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        if not os.path.exists(log_path):
+            return True, "No log yet"
+
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                lines = f.readlines()
+
+            hb_times = []
+            for line in reversed(lines[-100:]):
+                if '[KEEPALIVE]' in line or '[PIPE][HB]' in line:
+                    match = re.search(r'(\d{2}):(\d{2}):(\d{2})', line)
+                    if match:
+                        h, m, s = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                        ts = h * 3600 + m * 60 + s
+                        hb_times.append(ts)
+                        if len(hb_times) >= 5:
+                            break
+
+            if len(hb_times) < 2:
+                return True, "Heartbeat timing initializing..."
+
+            hb_times.reverse()
+            intervals = []
+            for i in range(len(hb_times) - 1):
+                delta = hb_times[i + 1] - hb_times[i]
+                if delta < 0:
+                    delta += 86400
+                intervals.append(delta)
+
+            avg_interval = sum(intervals) / len(intervals)
+            max_interval = max(intervals)
+
+            if max_interval > 15:
+                return False, f"Heartbeat interval too long: {max_interval}s"
+
+            return True, f"Heartbeat timing OK: {avg_interval:.1f}s avg"
+        except Exception as e:
+            return True, f"Timing parse error: {e}"
+
     def _check_pipes_ready(self, timeout=10):
         """Verify vClient has created required named pipes.
 
