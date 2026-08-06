@@ -80,6 +80,9 @@ class EmulatorLoader:
         self._server_port = None
         self._server_process = None  # Backend server subprocess
 
+        # Show startup banner and verify files
+        self._show_startup_banner()
+
         # Create UI
         self.create_ui()
 
@@ -782,9 +785,90 @@ class EmulatorLoader:
             print(f"[VGC-EMU] Server start error: {e}")
             return False
 
+    def _show_startup_banner(self):
+        """Display startup info and verify critical files exist"""
+        banner = """
+╔════════════════════════════════════════════════════════╗
+║  VGC Emulator Loader v3.0 - Esperanza                  ║
+║  VAL 5 Fix: Dual-Cache Validation                      ║
+║  Build: 2026-08-06                                     ║
+╚════════════════════════════════════════════════════════╝
+        """
+        print(banner)
+        files = {
+            "config.yaml": os.path.join(os.path.dirname(__file__), "config.yaml"),
+            "vClient.exe": os.path.join(os.path.dirname(__file__), "vClient.exe"),
+            "server/main.py": os.path.join(os.path.dirname(__file__), "server", "main.py"),
+        }
+        for name, path in files.items():
+            if os.path.exists(path):
+                print(f"[VGC-EMU] ✓ {name}")
+            else:
+                print(f"[VGC-EMU] ✗ {name} NOT FOUND")
+        return True
+
+    def _check_duplicate_session(self):
+        """Detect if old session is active before creating a new one"""
+        try:
+            state_file = os.path.join(os.path.dirname(__file__), "data", "session_state.json")
+            if os.path.exists(state_file):
+                with open(state_file, 'r') as f:
+                    old = json.load(f)
+                old_id = old.get("session_id")
+                old_ts = old.get("timestamp", 0)
+                if time.time() - old_ts < 300 and old_id:
+                    print(f"[VGC-EMU] Old session active: {old_id[:8]}, waiting purge...")
+                    time.sleep(2)
+        except Exception:
+            pass
+
+    def show_config_error(self, error_msg):
+        """Show config error screen"""
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        tk.Label(
+            self.root, text="⚙", font=("Consolas", 48, "bold"),
+            bg='#1a1a1a', fg='#ff4444',
+        ).pack(pady=30)
+
+        tk.Label(
+            self.root, text="CONFIG ERROR",
+            font=("Consolas", 16, "bold"), bg='#1a1a1a', fg='#ff4444',
+        ).pack(pady=10)
+
+        tk.Label(
+            self.root, text=error_msg,
+            font=("Consolas", 11), bg='#1a1a1a', fg='#ffffff',
+            wraplength=500, justify='left',
+        ).pack(pady=20, padx=40)
+
+        buttons_frame = tk.Frame(self.root, bg='#1a1a1a')
+        buttons_frame.pack(pady=30)
+
+        tk.Button(
+            buttons_frame, text="EDIT CONFIG.YAML", font=("Consolas", 12, "bold"),
+            bg='#9d4edd', fg='white', activebackground='#c77dff',
+            border=0, padx=40, pady=10, cursor='hand2',
+            command=self.open_config,
+        ).pack(side='left', padx=10)
+
+        tk.Button(
+            buttons_frame, text="EXIT", font=("Consolas", 12),
+            bg='#2a2a2a', fg='#999999', activebackground='#3a3a3a',
+            border=0, padx=30, pady=10, cursor='hand2',
+            command=self.exit_app,
+        ).pack(side='left', padx=10)
+
     def emulator_sequence(self):
         """Main emulator sequence — the ONLY way to start the full emulator stack."""
         try:
+            # PRE-CHECKS
+            self._check_duplicate_session()
+            if not self._validate_config():
+                self.show_config_error("Invalid config.yaml - check auth_key and server_ip")
+                return
+
             # Stage 0: Start backend server (0% -> 5%)
             self.update_status("Starting backend server...")
             self.update_progress(0, 0)
