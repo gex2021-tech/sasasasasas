@@ -60,30 +60,37 @@ class HeartbeatScheduler:
         ioctl_code: int = 0x222000,
         data: bytes = b"",
     ) -> bytes:
-        self.sequence += 1
+        with self._lock:
+            self.sequence += 1
+            seq = self.sequence
+
         try:
             resp = self.riot.send_heartbeat(
                 self.session_id,
                 self.container_id,
-                self.sequence,
+                seq,
                 ioctl_code,
                 data,
             )
-            # Inject magic numbers into heartbeat response based on packet type
-            # Paid emulator logs show magic=0x66 in auth, magic=0x67 in type 1 packets
-            if ioctl_code == 0x222000:  # Heartbeat ping
-                log.info(f"[PIPE][HB] vgk ping ack #{self.sequence} written={len(resp)}/{len(resp)}")
-            elif (ioctl_code >> 16) == 0x22:  # DeviceType 0x22 range
-                log.info(f"[PIPE] packet#{self.sequence} {len(resp)} bytes (0x{ioctl_code & 0xFFFF:x})")
-            
-            self.missed_count = 0
-            self.last_success = time.time()
+            if ioctl_code == 0x222000:
+                log.info(f"[PIPE][HB] vgk ping ack #{seq} written={len(resp)}/{len(resp)}")
+            elif (ioctl_code >> 16) == 0x22:
+                log.info(f"[PIPE] packet#{seq} {len(resp)} bytes (0x{ioctl_code & 0xFFFF:x})")
+
+            with self._lock:
+                self.missed_count = 0
+                self.last_success = time.time()
+                self.last_sent = time.time()
+                self._buffer.append(BufferedHeartbeat(seq, resp))
         except Exception as e:
             log.exception("hb error: %s", e)
-            self.missed_count += 1
+            with self._lock:
+                self.missed_count += 1
+                self.last_sent = time.time()
             resp = self.riot.fallback.get(self.session_id) or b""
-        self._record_heartbeat(resp)
-        self.last_sent = time.time()
+            with self._lock:
+                self._buffer.append(BufferedHeartbeat(seq, resp))
+
         if self.missed_count > self.max_missed:
             log.critical("session %s: missed HB risk Error 102", self.session_id[:8])
         return resp

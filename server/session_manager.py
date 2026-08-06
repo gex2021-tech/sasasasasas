@@ -371,12 +371,18 @@ class SessionManager:
             puuid=snap.client_puuid
         )
 
+        if status_code != 200:
+            log.error("session %s gateway auth FAILED status=%d - destroying container", session_id[:8], status_code)
+            self._log_event(session_id, "gateway", "auth_failed", f"status={status_code}")
+            self.wine.destroy_container(container_id)
+            return False
+
         # Cache gateway response for heartbeats
         with self._lock:
             s = self._sessions.get(session_id)
             if s:
                 s.gateway_response = response_body
-                s.gateway_auth_ok = (status_code == 200)
+                s.gateway_auth_ok = True
                 s.gateway_auth_time = time.time()
         
         # Cache gateway response for next VPS step/action
@@ -384,7 +390,7 @@ class SessionManager:
         
         token = self.riot.authenticate(container_id, profile)
         
-        # Get heartbeat config from global config (or use defaults optimized for VAL 5)
+        # Get heartbeat config from global config (matches config.yaml defaults: 10000ms / 500ms)
         from .config import load_config
         from pathlib import Path
         cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
@@ -394,8 +400,8 @@ class SessionManager:
             session_id, 
             container_id, 
             self.riot,
-            interval_ms=int(hb_cfg.get("interval_ms", 15000)),      # 15s default (faster)
-            jitter_max_ms=int(hb_cfg.get("jitter_max_ms", 1000)),   # 1s jitter
+            interval_ms=int(hb_cfg.get("interval_ms", 10000)),      # 10s default
+            jitter_max_ms=int(hb_cfg.get("jitter_max_ms", 500)),    # 500ms jitter
         )
 
         with self._lock:
