@@ -391,4 +391,8 @@ python emulator_loader.py
 - **Separación de Cachés Duales (`server/main.cpp`)**:
   - `g_cached_hb_payload`: Mantiene el token de latido del gateway (289–293 bytes) para responder a los Named Pipes `0x03` y `0x04`.
   - `g_cached_driver_status`: Mantiene las respuestas de estado de driver (110 bytes) para peticiones IOCTL `0x22C0EC`.
-- **Criterios de Código**: Producción limpia, sin stubs, validación estricta de códigos de error y trazado de hashes SHA1 en los logs.
+- **Endurecimiento de SessionManager & HeartbeatScheduler**:
+  - **Eliminación de Crash Vector**: Se eliminó la referencia a la variable no definida `keepalive_thread` en `_provision_container()`.
+  - **Alineación de Tiempos**: Se fijaron los defaults de latidos en `10000ms` (intervalo) y `500ms` (jitter), igualando a `config.yaml`.
+  - **Aborto de Sesión ante Fallo de Gateway**: Si `post_gateway_auth` retorna distinto de 200, destruye el contenedor de Wine inmediatamente.
+  - **Thread-Safety en Scheduler**: Se envolvió la mutación de contadores (`sequence`, `missed_count`, `last_sent`) con `with self._lock:` en `HeartbeatScheduler.send_heartbeat()`.
