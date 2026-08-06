@@ -506,6 +506,10 @@ class SessionManager:
             self._log_event(session_id, "session", "destroyed", "no_container")
             log.info("session %s destroyed (no container)", session_id[:8])
 
+        # Clean up VGCDriver persistent state
+        from .vgc_driver import _driver
+        _driver.cleanup_session(session_id)
+
     def _loop(self) -> None:
         while self._running:
             with self._lock:
