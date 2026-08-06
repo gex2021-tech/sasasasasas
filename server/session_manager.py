@@ -48,6 +48,12 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     scheduler: Optional[HeartbeatScheduler] = None
+    # Gateway validation fields
+    entitlements_token: str = ""
+    id_token: str = ""
+    gateway_response: bytes = b""
+    gateway_auth_time: float = 0.0
+    gateway_auth_ok: bool = False
 
 
 class SessionManager:
@@ -119,6 +125,9 @@ class SessionManager:
         log.info(f"[GW] generating 500 machine entries in memory...")
         log.info(f"[GW] selected machine idx={machine_idx} (500 entries)")
         
+        entitlements_token = getattr(auth, 'entitlements_token', '') or auth.jwt
+        id_token = getattr(auth, 'id_token', '') or ""
+
         session = Session(
             session_id=session_id,
             gateway_machine_id=auth.gateway_machine_id,
@@ -140,6 +149,10 @@ class SessionManager:
             gpu_brand=auth.gpu_brand if auth.gpu_brand else machine_profile.get("gpu_brand", "Intel"),
             gpu_model=auth.gpu_model if auth.gpu_model else machine_profile.get("gpu_model", "Intel UHD"),
             cpu_logical_count=auth.cpu_logical_count if auth.cpu_logical_count else machine_profile.get("cpu_logical_count", 12),
+            entitlements_token=entitlements_token,
+            id_token=id_token,
+            gateway_auth_ok=False,
+            gateway_auth_time=0.0,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -323,43 +336,48 @@ class SessionManager:
             self.wine.destroy_container(container_id)
             return False
 
-        # CRITICAL: Use SmartGatewayMinty for local token minting (paid emulator logic)
-        log.info("[CLI] Server gateway flow unavailable; falling back to local SmartGatewayMinty")
-        gateway_mint = SmartGatewayMinty(self.riot)
-        
-        # Mint/register tokens
-        ent_tok = getattr(snap, 'entitlement_token', '') or snap.riot_token
-        id_tok = getattr(snap, 'id_token', '')
-        tokens = gateway_mint.mint_tokens(
-            snap.client_puuid,
-            snap.riot_token,
-            snap.region,
-            entitlement_token=ent_tok,
-            id_token=id_tok
+        # CRITICAL: Build gateway envelope with REAL tokens from vClient
+        from .gateway_envelope import build_gateway_envelope, post_gateway_auth
+
+        entitlements_token = getattr(snap, 'entitlements_token', '') or getattr(snap, 'entitlement_token', '') or snap.riot_token
+        id_token = getattr(snap, 'id_token', '')
+
+        # Build dynamic protobuf gateway envelope
+        gateway_envelope = build_gateway_envelope(
+            session_id=session_id,
+            hwid_hex=self._hwid_hex(snap.hwid_fingerprint),
+            puuid=snap.client_puuid,
+            region=snap.region,
+            build_info={"major": 1, "minor": 18, "patch": 5},
+            rsa_spki_pem=snap.gateway_machine_id if snap.gateway_machine_id else b"",
+            timestamp_ms=int(time.time() * 1000),
+            entitlements_token=entitlements_token,
+            id_token=id_token,
         )
-        
-        # Build auth payload with machine profile
-        if machine_profile:
-            auth_payload = gateway_mint.build_auth_payload(tokens, machine_profile)
-        else:
-            # Fallback without machine profile
-            minimal_profile = {
-                "bios_info": "American Megatrends Inc. F34",
-                "cpu_model": snap.cpu_model or "AMD Ryzen 7 3700X 8-Core Processor",
-                "gpu_model": snap.gpu_model or "NVIDIA GeForce RTX 3070",
-                "volume_serial": "A1B2-C3D4",
-            }
-            auth_payload = gateway_mint.build_auth_payload(tokens, minimal_profile)
-        
-        # POST to gateway
+
+        log.info(
+            "session %s building gateway envelope (tokens from vClient) envelope_size=%d",
+            session_id[:8],
+            len(gateway_envelope)
+        )
+
+        # POST envelope to real Riot gateway
         status_code, response_body = post_gateway_auth(
-            auth_payload,
+            gateway_envelope,
             region=snap.region,
             session_id=session_id,
-            entitlements_token=tokens.entitlement_token,
-            id_token=tokens.id_token,
+            entitlements_token=entitlements_token,
+            id_token=id_token,
             puuid=snap.client_puuid
         )
+
+        # Cache gateway response for heartbeats
+        with self._lock:
+            s = self._sessions.get(session_id)
+            if s:
+                s.gateway_response = response_body
+                s.gateway_auth_ok = (status_code == 200)
+                s.gateway_auth_time = time.time()
         
         # Cache gateway response for next VPS step/action
         log.info("[GW] gateway response cached for next VPS gateway step/action")
