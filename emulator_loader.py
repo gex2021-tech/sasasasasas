@@ -1165,6 +1165,27 @@ class EmulatorLoader:
 
         self.update_live_queue_and_cooldown()
 
+        # Start background health monitoring during gameplay
+        threading.Thread(target=self._monitor_session_health, daemon=True).start()
+
+    def _monitor_session_health(self):
+        """Background monitor: verify vClient and server stay responsive during gameplay"""
+        while getattr(self, 'game_detected', False):
+            time.sleep(10)
+            if not hasattr(self, 'root') or not self.root.winfo_exists():
+                break
+
+            # 1. Check vClient process status
+            if not self._check_vclient_alive():
+                self.update_status("WARNING: vClient process stopped")
+                break
+
+            # 2. Check VPS server response via PING
+            server_ip, server_port = self.get_server_config()
+            if not self._protocol_ping(server_ip, server_port, timeout=2):
+                self.update_status("WARNING: VPS server connection lost")
+                break
+
     def update_live_queue_and_cooldown(self):
         """Thread-safe live loop for queue window & refresh cooldown"""
         if not hasattr(self, 'queue_timer_label') or not self.queue_timer_label.winfo_exists():
