@@ -471,53 +471,111 @@ class EmulatorLoader:
 
         return session_id, ioctl_active, tunnel_active
 
-    def _validate_heartbeat_cache(self, timeout=15):
-        """Verify heartbeat cache integrity from vClient.log.
+    def _check_pipes_ready(self, timeout=10):
+        """Verify vClient has created required named pipes.
 
-        Checks if the cached payload is valid (gateway heartbeat token, typically ~85-300 bytes)
-        and not contaminated with tiny status reports.
-
-        Returns: (valid: bool, size: int, msg: str)
+        Returns: (ready: bool, pipes_found: int)
         """
-        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        required_pipes = [
+            r'\\.\pipe\933823D3-C77B-4BAE-89D7-A92B567236BC',
+            r'\\.\pipe\vgservice',
+            r'\\.\pipe\vgc',
+        ]
         start = time.time()
+        pipes_found = 0
 
         while time.time() - start < timeout:
-            if not os.path.exists(log_path):
-                time.sleep(0.5)
-                continue
-
-            try:
-                with open(log_path, 'r', errors='replace') as f:
-                    lines = f.readlines()
-
-                scan = lines[-50:] if len(lines) > 50 else lines
-                for line in reversed(scan):
-                    # Line format: [PIPE][HB] vgk ping ack #1 written=104/104 (cache=server)
-                    if '[PIPE][HB]' in line or '[KEEPALIVE]' in line:
-                        m = re.search(r'(?:written=|size=)(\d+)', line)
-                        if m:
-                            size = int(m.group(1))
-                            if size >= 80:
-                                return True, size, f"Cache valid: {size} bytes"
-                            else:
-                                return False, size, f"Contaminated payload: {size} bytes"
-            except Exception as e:
-                pass
+            pipes_found = 0
+            for pipe in required_pipes:
+                try:
+                    h = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+                    os.close(h)
+                    pipes_found += 1
+                except (FileNotFoundError, OSError):
+                    pass
+            if pipes_found >= 2:
+                self.update_status(f"Named pipes ready ({pipes_found}/3)")
+                return True, pipes_found
             time.sleep(0.5)
 
-        return True, 104, "Cache assumed valid (server heartbeat active)"
+        return False, pipes_found
 
-    def _wait_for_valid_heartbeat_cache(self):
-        """Wait for vClient to receive a valid heartbeat payload from VPS."""
-        self.update_status("Validating heartbeat cache integrity...")
-        valid, size, msg = self._validate_heartbeat_cache(timeout=10)
-        if valid:
-            self.update_status(f"✓ Heartbeat cache validated ({size} bytes)")
-            return True
+    def _wait_for_pipes(self):
+        """Wait for vClient to create named pipes before game launch."""
+        self.update_status("Checking named pipe readiness...")
+        ready, count = self._check_pipes_ready(timeout=5)
+        if ready:
+            self.update_status(f"✓ Named pipes ready ({count}/3)")
         else:
-            self.update_status(f"Cache check notice: {msg}")
+            self.update_status(f"Pipes active ({count}/3) - proceeding")
+        return True
+
+    def _validate_config(self):
+        """Validate config.yaml before starting emulator stack."""
+        config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        if not os.path.exists(config_path):
+            self.update_status("ERROR: config.yaml not found")
+            return False
+
+        try:
+            if yaml:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    cfg = yaml.safe_load(f) or {}
+
+                auth_key = cfg.get('tunnel', {}).get('auth_key', '')
+                if not auth_key or auth_key == 'TROQUE_POR_UMA_CHAVE_SECRETA':
+                    self.update_status("ERROR: tunnel.auth_key not configured")
+                    return False
             return True
+        except Exception as e:
+            print(f"[VGC-EMU] Config check notice: {e}")
+            return True
+
+    def show_cache_error(self):
+        """Show error screen when heartbeat cache is contaminated (VAL 5 risk)"""
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        tk.Label(
+            self.root, text="⚠", font=("Consolas", 48, "bold"),
+            bg='#1a1a1a', fg='#ff9500',
+        ).pack(pady=30)
+
+        tk.Label(
+            self.root, text="HEARTBEAT CACHE CONTAMINATED",
+            font=("Consolas", 16, "bold"), bg='#1a1a1a', fg='#ff9500',
+        ).pack(pady=10)
+
+        details_frame = tk.Frame(self.root, bg='#1a1a1a')
+        details_frame.pack(pady=20)
+
+        details = [
+            "vClient.exe is sending driver status (~110 bytes)",
+            "instead of gateway heartbeat tokens (~289 bytes).",
+            "",
+            "Fix required:",
+            "  1. Rebuild vClient.exe with dual-cache fix",
+            "  2. Verify server/main.cpp has separate caches",
+            "  3. Run build_vclient.ps1 script",
+        ]
+
+        for detail in details:
+            tk.Label(
+                details_frame, text=detail, font=("Consolas", 10),
+                bg='#1a1a1a',
+                fg='#999999' if detail.startswith(' ') else '#ffffff',
+                anchor='w',
+            ).pack(anchor='w', padx=40)
+
+        buttons_frame = tk.Frame(self.root, bg='#1a1a1a')
+        buttons_frame.pack(pady=30)
+
+        tk.Button(
+            buttons_frame, text="RETRY", font=("Consolas", 12, "bold"),
+            bg='#9d4edd', fg='white', activebackground='#c77dff',
+            border=0, padx=40, pady=10, cursor='hand2',
+            command=self.restart_loader,
+        ).pack(side='left', padx=10)
 
     def _bypass_vgc_check(self):
         """Stage 4: VGC tunnel verification.
