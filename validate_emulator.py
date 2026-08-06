@@ -48,6 +48,7 @@ def validate_structure():
         'server/vgc_crypto.py': 'Crypto session',
         'server/vgc_driver.py': 'VGC driver emulation',
         'server/gateway_envelope.py': 'Gateway envelope generator',
+        'emulator_loader.py': 'Esperanza v3.0 Emulator Loader',
         'config.yaml': 'Configuration file',
         'certs/server.pem': 'TLS certificate',
         'certs/server.key': 'TLS private key',
