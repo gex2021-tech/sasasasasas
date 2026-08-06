@@ -327,8 +327,16 @@ class SessionManager:
         log.info("[CLI] Server gateway flow unavailable; falling back to local SmartGatewayMinty")
         gateway_mint = SmartGatewayMinty(self.riot)
         
-        # Mint tokens locally
-        tokens = gateway_mint.mint_tokens(snap.client_puuid, snap.riot_token, snap.region)
+        # Mint/register tokens
+        ent_tok = getattr(snap, 'entitlement_token', '') or snap.riot_token
+        id_tok = getattr(snap, 'id_token', '')
+        tokens = gateway_mint.mint_tokens(
+            snap.client_puuid,
+            snap.riot_token,
+            snap.region,
+            entitlement_token=ent_tok,
+            id_token=id_tok
+        )
         
         # Build auth payload with machine profile
         if machine_profile:
@@ -344,7 +352,14 @@ class SessionManager:
             auth_payload = gateway_mint.build_auth_payload(tokens, minimal_profile)
         
         # POST to gateway
-        status_code, response_body = post_gateway_auth(auth_payload, snap.region, session_id)
+        status_code, response_body = post_gateway_auth(
+            auth_payload,
+            region=snap.region,
+            session_id=session_id,
+            entitlements_token=tokens.entitlement_token,
+            id_token=tokens.id_token,
+            puuid=snap.client_puuid
+        )
         
         # Cache gateway response for next VPS step/action
         log.info("[GW] gateway response cached for next VPS gateway step/action")
