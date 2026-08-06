@@ -1,7 +1,7 @@
 """In-process vgk crypto session — mount + IOCTL payload generation.
 
 Stealth features:
-  - Per-heartbeat token noise via HMAC-SHA256 rolling key
+  - Per-heartbeat token noise via HMAC-SHA256 rolling key + salt
   - Session-bound AES key derivation using HMAC(jwt, hwid)
   - Protobuf header preserved while payload bytes vary
 """
@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import struct
 import time
 from dataclasses import dataclass, field
@@ -65,9 +66,22 @@ def _derive_session_key(jwt: str, hwid_hex: str) -> bytes:
     Stronger than plain SHA256(jwt) — ties the crypto session to a
     specific machine fingerprint so replayed JWTs from different HWIDs
     produce different key material.
+    
+    Args:
+        jwt: Riot JWT token (may be empty on first mount before auth).
+        hwid_hex: Hardware fingerprint as hex string.
+        
+    Returns:
+        32-byte AES key suitable for HMAC operations.
     """
+    if not jwt:
+        log.warning("[CRYPTO] deriving key with empty JWT — using fallback")
+        jwt = "vgc_default_jwt"
+    
     if not hwid_hex:
-        return hashlib.sha256(jwt.encode("utf-8")).digest()
+        log.warning("[CRYPTO] deriving key with empty HWID — using fallback")
+        hwid_hex = "00" * 32
+    
     return hmac.new(
         jwt.encode("utf-8"),
         hwid_hex.encode("utf-8"),
@@ -79,17 +93,15 @@ def _noise_token(
     base: bytes,
     session_id: str,
     sequence: int,
-    timestamp: float,
+    timestamp_us: float,
+    salt: bytes = b"",
 ) -> bytes:
     """Apply per-heartbeat noise to the FALLBACK_TOKEN.
 
-    Preserves the protobuf header (bytes 0..19) intact. XORs bytes
-    20..280 with a rolling HMAC key derived from (session_id, seq, ts).
-    Each heartbeat produces a unique payload — defeats static
-    signature detection while keeping the outer protobuf envelope valid.
+    Preserves protobuf header (bytes 0..19). XORs bytes 20..280
+    with rolling HMAC-SHA256 derived from (session_id, seq, ts_us, salt).
     """
-    # Build a rolling key: HMAC-SHA256(session_id, seq || ts)
-    msg = struct.pack("!Qd", sequence, timestamp)
+    msg = struct.pack("!Qd", int(sequence), timestamp_us) + salt
     rolling = hmac.new(
         session_id.encode("utf-8") if session_id else b"fallback",
         msg,
@@ -119,59 +131,180 @@ class CryptoSession:
     last_mount_at: float = 0.0
 
     def mount(self, profile: Dict[str, Any]) -> None:
+        """Mount a session profile for crypto operations.
+        
+        Args:
+            profile: Session dict with jwt, hwid_fingerprint_hex, gateway_token (optional), etc.
+        """
         self.profile = dict(profile)
         jwt = str(profile.get("jwt", ""))
         hwid_hex = str(profile.get("hwid_fingerprint_hex", ""))
+        
         if jwt:
             self.aes_key = _derive_session_key(jwt, hwid_hex)
         else:
             seed = json.dumps(profile, sort_keys=True, default=str).encode("utf-8")
             self.aes_key = hashlib.sha256(seed).digest()
+        
+        # Validate gateway_token if present
+        gateway_token = profile.get("gateway_token")
+        if gateway_token:
+            if not isinstance(gateway_token, (bytes, bytearray)):
+                log.warning(
+                    "[CRYPTO] session %s gateway_token is not bytes (type=%s) — clearing",
+                    str(profile.get("session_id", ""))[:8],
+                    type(gateway_token).__name__
+                )
+                self.profile["gateway_token"] = None
+            elif len(gateway_token) < 32:
+                log.warning(
+                    "[CRYPTO] session %s gateway_token suspiciously small (%d bytes) — may cause VAL 5",
+                    str(profile.get("session_id", ""))[:8],
+                    len(gateway_token)
+                )
+            elif len(gateway_token) > 10000:
+                log.warning(
+                    "[CRYPTO] session %s gateway_token suspiciously large (%d bytes) — truncating",
+                    str(profile.get("session_id", ""))[:8],
+                    len(gateway_token)
+                )
+                self.profile["gateway_token"] = gateway_token[:10000]
+
         self.mounted = True
         self.last_mount_at = time.time()
+        
+        session_id = str(profile.get("session_id", ""))
+        puuid = str(profile.get("client_puuid", ""))
+        token_status = "cached" if self.profile.get("gateway_token") else "pending"
+
         log.info(
-            "crypto mounted session=%s puuid=%s key=%s",
-            str(profile.get("session_id", ""))[:8],
-            str(profile.get("client_puuid", ""))[:8],
+            "[CRYPTO] session %s mounted (puuid=%s token=%s key=%s)",
+            session_id[:8],
+            puuid[:8],
+            token_status,
             self.aes_key[:4].hex(),
         )
 
     def update_jwt(self, jwt: str, puuid: str) -> None:
+        """Refresh JWT token (called when client sends JWT_UPDATE message)."""
+        if not jwt:
+            log.warning("[CRYPTO] update_jwt called with empty JWT")
+            return
+
+        old_key = self.aes_key[:4].hex() if self.aes_key else "none"
+
         self.profile["jwt"] = jwt
         self.profile["client_puuid"] = puuid
-        if jwt:
-            hwid_hex = str(self.profile.get("hwid_fingerprint_hex", ""))
-            self.aes_key = _derive_session_key(jwt, hwid_hex)
+
+        hwid_hex = str(self.profile.get("hwid_fingerprint_hex", ""))
+        self.aes_key = _derive_session_key(jwt, hwid_hex)
+
+        new_key = self.aes_key[:4].hex()
+        session_id = str(self.profile.get("session_id", ""))
+
+        log.info(
+            "[CRYPTO] session %s jwt refreshed (puuid=%s key=%s->%s)",
+            session_id[:8],
+            puuid[:8],
+            old_key,
+            new_key,
+        )
 
     def heartbeat_payload(self) -> bytes:
         self.hb_count += 1
         if self.profile.get("gateway_token"):
             return bytes(self.profile["gateway_token"])
-        # Apply per-heartbeat noise instead of returning static token
+
         session_id = str(self.profile.get("session_id", ""))
-        return _noise_token(FALLBACK_TOKEN, session_id, self.hb_count, time.time())
+        if self.hb_count == 1:
+            log.info(
+                "[CRYPTO] session %s using FALLBACK_TOKEN on first heartbeat (gateway cache empty)",
+                session_id[:8]
+            )
+
+        salt = os.urandom(4)
+        ts_us = time.time() * 1_000_000
+
+        return _noise_token(
+            FALLBACK_TOKEN,
+            session_id,
+            self.hb_count,
+            ts_us,
+            salt=salt
+        )
 
     def ioctl_response(self, ioctl_code: int, data: bytes) -> bytes:
+        """Dispatch IOCTL request to driver handler with validation."""
         if not self.mounted:
+            log.warning("[CRYPTO] ioctl_response called on unmounted session")
             return b""
 
-        # Import driver here to avoid circular dependency
+        VALID_IOCTL_CODES = {
+            0x222000,  # IOCTL_VGK_HEARTBEAT
+            0x22C03C,  # IOCTL_VGK_ACCESS
+            0x222004,  # IOCTL_VGK_INTEGRITY
+            0x222008,  # IOCTL_VGK_ATTESTATION
+            0x22200C,  # IOCTL_VGK_MEMORY_SCAN
+            0x222010,  # IOCTL_VGK_MODULE_CHECK
+            0x22C0EC,  # IOCTL_VGK_DRIVER_STATUS
+        }
+
+        if ioctl_code not in VALID_IOCTL_CODES:
+            log.error(
+                "[CRYPTO] session %s invalid IOCTL code: 0x%X",
+                str(self.profile.get("session_id", ""))[:8],
+                ioctl_code
+            )
+            return b""
+
         from .vgc_driver import handle_driver_ioctl
-        
         session_id = str(self.profile.get("session_id", ""))
-        
-        # Use enhanced driver for realistic responses
-        return handle_driver_ioctl(
-            session_id=session_id,
-            ioctl_code=ioctl_code,
-            input_data=data,
-            aes_key=self.aes_key
-        )
+
+        try:
+            response = handle_driver_ioctl(
+                session_id=session_id,
+                ioctl_code=ioctl_code,
+                input_data=data,
+                aes_key=self.aes_key
+            )
+            log.debug(
+                "[CRYPTO] session %s ioctl=0x%X response=%d bytes",
+                session_id[:8],
+                ioctl_code,
+                len(response)
+            )
+            return response
+        except Exception as e:
+            log.error(
+                "[CRYPTO-ERR] session %s ioctl=0x%X: %s",
+                session_id[:8],
+                ioctl_code,
+                e
+            )
+            return b""
 
 
 def profile_to_mount_json(profile: Dict[str, Any]) -> bytes:
-    safe = {
-        k: (v.hex() if isinstance(v, (bytes, bytearray)) else v)
-        for k, v in profile.items()
-    }
-    return json.dumps(safe, separators=(",", ":")).encode("utf-8")
+    """Serialize profile to JSON for storage/transit."""
+    safe = {}
+    for k, v in profile.items():
+        try:
+            if isinstance(v, (bytes, bytearray)):
+                safe[k] = v.hex()
+            elif isinstance(v, (int, str, float, bool, type(None))):
+                safe[k] = v
+            elif isinstance(v, dict):
+                safe[k] = {
+                    nk: (nv.hex() if isinstance(nv, (bytes, bytearray)) else nv)
+                    for nk, nv in v.items()
+                }
+            else:
+                safe[k] = str(v)
+        except Exception as e:
+            log.warning("[CRYPTO] profile_to_mount_json skipping key %s: %s", k, e)
+
+    try:
+        return json.dumps(safe, separators=(",", ":")).encode("utf-8")
+    except Exception as e:
+        log.error("[CRYPTO] profile_to_mount_json failed: %s", e)
+        return b"{}"
