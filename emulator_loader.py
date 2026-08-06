@@ -156,7 +156,7 @@ class EmulatorLoader:
 
         # Subtitle
         subtitle = tk.Label(
-            self.root, text="Esperanza v1.0",
+            self.root, text="Esperanza v3.0 - VAL 5 Fix",
             font=("Consolas", 10), bg='#1a1a1a', fg='#666666',
         )
         subtitle.pack()
@@ -1382,6 +1382,7 @@ class EmulatorLoader:
 
             if auth_confirmed:
                 self.save_auth_state()
+                self._cache_session_state()
                 sid_str = session_id[:8] if session_id else 'N/A'
                 self.update_status(f"Auth verified (session {sid_str})")
                 return True
@@ -1389,6 +1390,7 @@ class EmulatorLoader:
             # 3. Fallback: if vClient alive, trust auth was done by vClient
             if self._check_vclient_alive():
                 self.save_auth_state()
+                self._cache_session_state()
                 self.update_status("Server PING missed but vClient alive - auth assumed")
                 return True
 
@@ -1398,6 +1400,7 @@ class EmulatorLoader:
         except Exception as e:
             self.update_status(f"Auth error: {str(e)}, proceeding anyway")
             self.save_auth_state()
+            self._cache_session_state()
             return True
 
     # ──────────────────────────────────────────────────────────
