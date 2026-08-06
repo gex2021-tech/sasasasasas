@@ -382,9 +382,6 @@ class SessionManager:
         # Cache gateway response for next VPS step/action
         log.info("[GW] gateway response cached for next VPS gateway step/action")
         
-        # Start keepalive loop (re-auth every 45 minutes)
-        keepalive_thread = start_keepalive_loop(session_id, tokens, interval_sec=2700)
-        
         token = self.riot.authenticate(container_id, profile)
         
         # Get heartbeat config from global config (or use defaults optimized for VAL 5)
