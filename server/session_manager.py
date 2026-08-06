@@ -57,6 +57,8 @@ class Session:
     # Machine pool profile fields
     machine_idx: int = 0
     machine_profile: dict = field(default_factory=dict)
+    # Dynamic build info
+    build_info: dict = field(default_factory=dict)
 
 
 class SessionManager:
@@ -131,6 +133,15 @@ class SessionManager:
         entitlements_token = getattr(auth, 'entitlements_token', '') or auth.jwt
         id_token = getattr(auth, 'id_token', '') or ""
 
+        build_info = {
+            "branch": getattr(auth, 'build_branch', '') or "release",
+            "changelist": getattr(auth, 'build_changelist', 0) or 0,
+            "major": getattr(auth, 'build_major', 0) or 1,
+            "minor": getattr(auth, 'build_minor', 0) or 18,
+            "patch": getattr(auth, 'build_patch', 0) or 5,
+            "flags": getattr(auth, 'build_flags', 0) or 0,
+        }
+
         session = Session(
             session_id=session_id,
             gateway_machine_id=auth.gateway_machine_id,
@@ -158,6 +169,7 @@ class SessionManager:
             gateway_auth_time=0.0,
             machine_idx=machine_idx,
             machine_profile=machine_profile,
+            build_info=build_info,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -353,7 +365,7 @@ class SessionManager:
             hwid_hex=self._hwid_hex(snap.hwid_fingerprint),
             puuid=snap.client_puuid,
             region=snap.region,
-            build_info={"major": 1, "minor": 18, "patch": 5},
+            build_info=snap.build_info if snap.build_info else {"major": 1, "minor": 18, "patch": 5},
             rsa_spki_pem=snap.gateway_machine_id if snap.gateway_machine_id else b"",
             timestamp_ms=int(time.time() * 1000),
             entitlements_token=entitlements_token,
