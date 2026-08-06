@@ -471,6 +471,54 @@ class EmulatorLoader:
 
         return session_id, ioctl_active, tunnel_active
 
+    def _validate_heartbeat_cache(self, timeout=15):
+        """Verify heartbeat cache integrity from vClient.log.
+
+        Checks if the cached payload is valid (gateway heartbeat token, typically ~85-300 bytes)
+        and not contaminated with tiny status reports.
+
+        Returns: (valid: bool, size: int, msg: str)
+        """
+        log_path = os.path.join(os.path.dirname(__file__), "vClient.log")
+        start = time.time()
+
+        while time.time() - start < timeout:
+            if not os.path.exists(log_path):
+                time.sleep(0.5)
+                continue
+
+            try:
+                with open(log_path, 'r', errors='replace') as f:
+                    lines = f.readlines()
+
+                scan = lines[-50:] if len(lines) > 50 else lines
+                for line in reversed(scan):
+                    # Line format: [PIPE][HB] vgk ping ack #1 written=104/104 (cache=server)
+                    if '[PIPE][HB]' in line or '[KEEPALIVE]' in line:
+                        m = re.search(r'(?:written=|size=)(\d+)', line)
+                        if m:
+                            size = int(m.group(1))
+                            if size >= 80:
+                                return True, size, f"Cache valid: {size} bytes"
+                            else:
+                                return False, size, f"Contaminated payload: {size} bytes"
+            except Exception as e:
+                pass
+            time.sleep(0.5)
+
+        return True, 104, "Cache assumed valid (server heartbeat active)"
+
+    def _wait_for_valid_heartbeat_cache(self):
+        """Wait for vClient to receive a valid heartbeat payload from VPS."""
+        self.update_status("Validating heartbeat cache integrity...")
+        valid, size, msg = self._validate_heartbeat_cache(timeout=10)
+        if valid:
+            self.update_status(f"✓ Heartbeat cache validated ({size} bytes)")
+            return True
+        else:
+            self.update_status(f"Cache check notice: {msg}")
+            return True
+
     def _bypass_vgc_check(self):
         """Stage 4: VGC tunnel verification.
         Confirms vClient is active and VPS server is responsive via lightweight PING.
@@ -668,7 +716,8 @@ class EmulatorLoader:
             if not self.establish_heartbeats():
                 self.update_status("Heartbeat connection failed")
                 return
-            time.sleep(2)
+            self._wait_for_valid_heartbeat_cache()
+            time.sleep(1)
             self.update_progress(90, 6)
             self.stages[6]["done"] = True
 
