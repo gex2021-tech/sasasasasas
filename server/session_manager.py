@@ -54,6 +54,9 @@ class Session:
     gateway_response: bytes = b""
     gateway_auth_time: float = 0.0
     gateway_auth_ok: bool = False
+    # Machine pool profile fields
+    machine_idx: int = 0
+    machine_profile: dict = field(default_factory=dict)
 
 
 class SessionManager:
@@ -153,6 +156,8 @@ class SessionManager:
             id_token=id_token,
             gateway_auth_ok=False,
             gateway_auth_time=0.0,
+            machine_idx=machine_idx,
+            machine_profile=machine_profile,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -285,7 +290,6 @@ class SessionManager:
             auth_n = s.pipe_auth_count
             cid = s.container_id
 
-        self._log_event(session_id, "pipe_auth", "repeat", f"pid={valorant_pid} count={auth_n}")
         log.info(
             "session %s pipe auth repeat (container %s pid=%d)",
             session_id[:8],
@@ -295,6 +299,7 @@ class SessionManager:
         return True
 
     def _provision_container(self, session_id: str, machine_profile: dict = None) -> bool:
+        """Provision Wine container + gateway auth using Session cached attributes."""
         with self._lock:
             snap = self._sessions.get(session_id)
         if not snap:
@@ -305,7 +310,9 @@ class SessionManager:
         
         container_id = self.wine.create_container()
         
-        # Use machine profile from pool if provided (critical for anti-fingerprinting)
+        # Use machine profile from Session if omitted
+        m_profile = machine_profile if machine_profile else snap.machine_profile
+
         profile = {
             "session_id": session_id,
             "gateway_machine_id": snap.gateway_machine_id,
@@ -319,9 +326,9 @@ class SessionManager:
             "client_ts_ms": snap.client_ts_ms,
             "jwt": snap.riot_token,
             # Merge machine profile fields (from pool of 500)
-            "bios_info": machine_profile.get("bios_info") if machine_profile else None,
-            "motherboard": machine_profile.get("motherboard") if machine_profile else None,
-            "volume_serial": machine_profile.get("volume_serial") if machine_profile else None,
+            "bios_info": m_profile.get("bios_info") if m_profile else None,
+            "motherboard": m_profile.get("motherboard") if m_profile else None,
+            "volume_serial": m_profile.get("volume_serial") if m_profile else None,
             "cpu_brand": snap.cpu_brand,
             "cpu_model": snap.cpu_model,
             "gpu_brand": snap.gpu_brand,
@@ -336,10 +343,9 @@ class SessionManager:
             self.wine.destroy_container(container_id)
             return False
 
-        # CRITICAL: Build gateway envelope with REAL tokens from vClient
-
-        entitlements_token = getattr(snap, 'entitlements_token', '') or getattr(snap, 'entitlement_token', '') or snap.riot_token
-        id_token = getattr(snap, 'id_token', '')
+        # CRITICAL: Build gateway envelope with REAL tokens from vClient (cached in Session)
+        entitlements_token = snap.entitlements_token or snap.riot_token
+        id_token = snap.id_token or ""
 
         # Build dynamic protobuf gateway envelope
         gateway_envelope = build_gateway_envelope(
@@ -370,11 +376,29 @@ class SessionManager:
             puuid=snap.client_puuid
         )
 
-        if status_code != 200:
-            log.error("session %s gateway auth FAILED status=%d - destroying container", session_id[:8], status_code)
-            self._log_event(session_id, "gateway", "auth_failed", f"status={status_code}")
+        # VALIDATION: Gateway response MUST be non-empty + status 200
+        if status_code != 200 or not response_body:
+            log.error(
+                "session %s gateway auth FAILED status=%d response_len=%d - destroying container",
+                session_id[:8],
+                status_code,
+                len(response_body) if response_body else 0
+            )
+            self._log_event(
+                session_id,
+                "gateway",
+                "auth_failed",
+                f"status={status_code} len={len(response_body) if response_body else 0}"
+            )
             self.wine.destroy_container(container_id)
             return False
+
+        if len(response_body) < 32:
+            log.warning(
+                "session %s gateway response suspiciously small (%d bytes) — may be fallback",
+                session_id[:8],
+                len(response_body)
+            )
 
         # Cache gateway response for heartbeats
         with self._lock:
@@ -384,8 +408,7 @@ class SessionManager:
                 s.gateway_auth_ok = True
                 s.gateway_auth_time = time.time()
         
-        # Cache gateway response for next VPS step/action
-        log.info("[GW] gateway response cached for next VPS gateway step/action")
+        log.info("[GW] gateway response cached (%d bytes) for heartbeat relay", len(response_body))
         
         token = self.riot.authenticate(container_id, profile)
         
@@ -395,12 +418,22 @@ class SessionManager:
         cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
         hb_cfg = cfg.get("heartbeat", {})
         
+        interval_ms = int(hb_cfg.get("interval_ms", 10000))
+        jitter_max_ms = int(hb_cfg.get("jitter_max_ms", 500))
+
+        log.info(
+            "session %s heartbeat config: interval=%dms jitter=%dms",
+            session_id[:8],
+            interval_ms,
+            jitter_max_ms
+        )
+
         scheduler = HeartbeatScheduler(
             session_id, 
             container_id, 
             self.riot,
-            interval_ms=int(hb_cfg.get("interval_ms", 10000)),      # 10s default
-            jitter_max_ms=int(hb_cfg.get("jitter_max_ms", 500)),    # 500ms jitter
+            interval_ms=interval_ms,
+            jitter_max_ms=jitter_max_ms,
         )
 
         with self._lock:
@@ -421,8 +454,12 @@ class SessionManager:
             self.riot.on_client_jwt(session_id, container_id, jwt, puuid)
 
         # Send FIRST heartbeat immediately to prevent VAL 5
-        log.info("session %s sending IMMEDIATE first heartbeat to prevent VAL 5", session_id[:8])
-        scheduler.send_heartbeat(force=True)
+        log.info("session %s sending IMMEDIATE first heartbeat (force=True) to prevent VAL 5", session_id[:8])
+        try:
+            scheduler.send_heartbeat(force=True)
+            log.info("session %s first heartbeat sent successfully", session_id[:8])
+        except Exception as e:
+            log.error("session %s first heartbeat FAILED: %s — continuing anyway", session_id[:8], e)
         
         provision_time = time.time() - start_time
         self._log_event(
@@ -432,19 +469,25 @@ class SessionManager:
             f"cid={container_id[:8]} pid={pid} jwt_len={len(jwt)} provision_ms={int(provision_time*1000)}",
         )
         log.info(
-            "session %s container %s provisioned in %.2fs (pid=%d jwt_len=%d puuid=%s)",
+            "session %s container %s provisioned in %.2fs (pid=%d jwt_len=%d puuid=%s machine_idx=%d)",
             session_id[:8],
             container_id[:8],
             provision_time,
             pid,
             len(jwt),
             puuid[:8] if puuid else "",
+            snap.machine_idx,
         )
-        
-        # Warn if provisioning took too long (risk of VAL 5)
-        if provision_time > 10.0:
+
+        if provision_time > 15.0:
             log.warning(
-                "session %s SLOW PROVISIONING (%.2fs) - may trigger VAL 5!",
+                "session %s SLOW PROVISIONING (%.2fs) — exceeded safety threshold. May trigger VAL 5!",
+                session_id[:8],
+                provision_time
+            )
+        elif provision_time > 10.0:
+            log.warning(
+                "session %s slow provisioning (%.2fs) — monitor for VAL 5",
                 session_id[:8],
                 provision_time
             )
