@@ -1,7 +1,7 @@
 # Contexto Completo del Proyecto: VGC Emulator (amulator)
 
 **Fecha de actualizacion**: 2026-08-06
-**Estado global**: Produccion / Esperanza v3.0. Rebuild de `vClient.exe` con dual-cache completado, validacion de tamaño de payload integrada en el Loader, autenticacion HTTPS real con Vanguard Gateway habilitada y derivacion dinamica de tokens F1/F15 aplicada.
+**Estado global**: En desarrollo activo. VAL 5 fix aplicado, pendiente rebuild de vClient.exe.
 
 ---
 
@@ -13,8 +13,8 @@ Sistema de emulacion 2-PC para bypassear Riot Vanguard (anti-cheat de VALORANT).
 
 | Componente | Archivo | Funcion |
 |---|---|---|
-| **Loader GUI** | `emulator_loader.py` | Tkinter UI (Esperanza v3.0). UNICO punto de entrada. Arranca server, `vClient.exe`, Riot Client, verifica Named Pipes, valida tamaño de caché (~289-293B vs ~110B), monitorea latidos en tiempo real y muestra la ventana de cola de matchmaking. |
-| **vClient** | `server/main.cpp` -> `vClient.exe` | C++ binary (compilado con `clang++`). Crea Named Pipes (`\\.\pipe\vgk`, `\\.\pipe\vgc`, `\\.\pipe\vgservice`). Intercepta IPC del juego. Maneja dual-cache independiente para `0x222000` (latidos) y `0x22C0EC` (estado del driver). Relay TLS al VPS. |
+| **Loader GUI** | `emulator_loader.py` | Tkinter UI. UNICO punto de entrada. Arranca server, vClient, Riot Client, verifica heartbeats, muestra queue window. |
+| **vClient** | `server/main.cpp` -> `vClient.exe` | C++ binary. Crea Named Pipes. Intercepta IPC del juego. Relay TLS al VPS. |
 | **Config local** | Registry + Services | Escribe HKLM Riot Vanguard, configura servicios vgc (stopped) y vgk (kernel driver). |
 
 ### Servidor VPS (Backend - 192.168.1.136:51820)
@@ -22,12 +22,12 @@ Sistema de emulacion 2-PC para bypassear Riot Vanguard (anti-cheat de VALORANT).
 | Componente | Archivo | Funcion |
 |---|---|---|
 | **Entry point** | `server/main.py` | Inicia TunnelServer TLS, SessionManager, HeartbeatRelay, Van84Monitor, WineManager. |
-| **Tunnel** | `server/tunnel_server.py` | TLS TCP server port 51820. Maneja `SESSION_AUTH`, `IOCTL`, `PING`/`PONG`, `JWT_UPDATE`, `PIPE_AUTH`, `SYNC`. |
-| **Sessions** | `server/session_manager.py` | Crea sesiones, asigna perfiles HW (pool 500 machines), purga duplicados por PUUID, extrae `entitlements_token` e `id_token` reales de `vClient`, construye el protobuf envelope, transmite a Vanguard Gateway y despacha el primer latido inmediato. |
+| **Tunnel** | `server/tunnel_server.py` | TLS TCP server port 51820. Maneja SESSION_AUTH, IOCTL, PING/PONG, JWT_UPDATE, PIPE_AUTH, SYNC. |
+| **Sessions** | `server/session_manager.py` | Crea sesiones, asigna perfiles HW (pool 500 machines), purga duplicados por PUUID, gateway auth via SmartGatewayMinty. |
 | **Heartbeats** | `server/heartbeat_scheduler.py` | Scheduler por sesion (interval 10s, jitter 500ms). HeartbeatRelay despacha IOCTLs. |
 | **VGC Driver** | `server/vgc_driver.py` | Emula vgk.sys: 7 IOCTLs (0x222000 heartbeat, 0x22C0EC driver status, 0x222004 integrity, 0x222008 attestation, etc.) |
-| **Gateway** | `server/gateway_envelope.py` | Realiza peticiones HTTPS POST reales a Vanguard Gateway (`https://{region}.vg.ac.pvp.net/vanguard/v1/gateway?action=3`) con encabezados de entitlements. Construye protobuf gateway envelope con F1/F15 tokens, OSInfo (`variant=1`). |
-| **Tokens** | `server/vgc_tokens.py` | F1 token (6 componentes: nonce + 2x HMAC-SHA512 + timestamp + hw_blob; derivacion de `secret_key` via `entitlements_token`/`HWID`). F15 = Base64(SHA1(F1 + version + suffix)). |
+| **Gateway** | `server/gateway_envelope.py` | SmartGatewayMinty: mints entitlement/ID/access tokens localmente. Builds protobuf gateway envelope con F1/F15 tokens, OSInfo. |
+| **Tokens** | `server/vgc_tokens.py` | F1 token (6 componentes: nonce + 2x HMAC-SHA512 + timestamp + hw_blob). F15 = Base64(SHA1(F1 + version + suffix)). |
 | **Crypto** | `server/vgc_crypto.py` | CryptoSession: HMAC key derivation, per-heartbeat noise (XOR rolling HMAC), FALLBACK_TOKEN (293 bytes). |
 | **HB Tasks** | `server/heartbeat_tasks.py` | Decrypt 293-byte blobs via HKDF+AES-GCM. Parse protobuf tasks. Build TaskResultRequest (type 11). |
 | **Protocol** | `server/protocol.py` | Wire protocol: header !II (msg_type, payload_len). 16 message types. SessionAuthData with 22 fields. |
@@ -93,6 +93,18 @@ Header: struct.pack("!II", msg_type, payload_length)
 
 ---
 
+## 4. Flujo de Ejecucion Completo (Loader v2.0)
+
+El loader (emulator_loader.py) es el UNICO punto de entrada. Secuencia de 8 stages:
+
+```
+Stage 0: Start backend server (python -m server.main)
+  - Si ya responde PING, lo reutiliza
+  - Si no, lanza subprocess, espera hasta 15s
+  
+Stage 1: Verify server connection (PING/PONG TLS)
+
+Stage 2: Kill stale processes + configure services
   - sc stop vgc, taskkill vgc.exe/vgk.sys
   - Registry: HKLM\SOFTWARE\Riot Games, Inc\Riot Vanguard
   - Services: vgc (demand/stopped), vgk (kernel/started)
@@ -363,3 +375,20 @@ python emulator_loader.py
 - hmac.new() en Python es correcto (no es un bug) -- el modulo hmac usa hmac.new(key, msg, digestmod).
 - Los tokens F1 tienen exactamente 166 bytes (16+64+64+0+6+16). F15 es siempre 28 chars Base64.
 - El server Python usa embedded crypto (CryptoSession) como fallback cuando program.exe/Wine no esta disponible.
+
+---
+
+## 15. Contexto Adicional de Analisis y Feedback (Nova Senior DevOps Architect)
+
+- **Arquitectura de 2 Procesos Confirmada**:
+  - `emulator_loader.py` (GUI Python): Orquestador ligero. Verifica servicios, lanza backend y vClient, monitorea la salud mediante logs/PINGs sin enviar sondas IOCTL sintéticas que puedan colisionar con la sesión de VALORANT.
+  - `vClient.exe` (Binario C++): Intercepta los Named Pipes del juego, extrae tokens de memoria (`entitlements_token` e `id_token`), mantiene el túnel TLS con la VPS y despacha IOCTLs duales (`0x222000` y `0x22C0EC`).
+- **Flujo de Gateway Vanguard Real**:
+  - La VPS NO inventa tokens falsos ni les aplica relleno (`=`). Utiliza los tokens JWT reales transmitidos por `vClient`.
+  - Deriva la clave secreta de F1 a partir de `entitlements_token`.
+  - Envía la solicitud HTTPS `POST` a la pasarela oficial (`https://latam.vg.ac.pvp.net/vanguard/v1/gateway?action=3`) con reintentos para 429/5xx.
+  - Almacena en caché la respuesta `200 OK` para despacharla inmediatamente en el primer latido del planificador (`send_heartbeat(force=True)`).
+- **Separación de Cachés Duales (`server/main.cpp`)**:
+  - `g_cached_hb_payload`: Mantiene el token de latido del gateway (289–293 bytes) para responder a los Named Pipes `0x03` y `0x04`.
+  - `g_cached_driver_status`: Mantiene las respuestas de estado de driver (110 bytes) para peticiones IOCTL `0x22C0EC`.
+- **Criterios de Código**: Producción limpia, sin stubs, validación estricta de códigos de error y trazado de hashes SHA1 en los logs.
