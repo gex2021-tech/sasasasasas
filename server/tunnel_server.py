@@ -264,13 +264,18 @@ class TunnelServer:
                         log.warning("unknown msg type=%d plen=%d", mt, plen)
 
         except (ConnectionError, ssl.SSLError, OSError, struct.error, socket.timeout) as e:
+            error_type = type(e).__name__
             if isinstance(e, socket.timeout):
                 log.info("client timeout %s (idle 120s)", addr)
+            elif isinstance(e, ssl.SSLError):
+                log.warning("SSL error from %s: %s", addr, e)
+            elif isinstance(e, ConnectionError):
+                log.debug("connection error from %s: %s", addr, e)
             else:
-                log.info("disconnect %s: %s", addr, type(e).__name__)
+                log.error("tunnel error from %s (%s): %s", addr, error_type, e)
         finally:
             if session_id:
-                log.info("tunnel closed session=%s stays on server", session_id[:8])
+                log.info("tunnel closed session=%s stays on server (session persists)", session_id[:8])
             with self._lock:
                 self._clients -= 1
 
