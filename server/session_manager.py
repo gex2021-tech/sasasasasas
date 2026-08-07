@@ -1,23 +1,119 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from .event_log import EventRecord, SessionEventLog
+from .gateway_envelope import build_gateway_envelope, post_gateway_auth
 from .heartbeat_scheduler import HeartbeatRelay, HeartbeatScheduler
 from .jwt_util import account_from_jwt, shard_from_jwt
+from .machine_pool import select_machine_for_session
 from .protocol import SessionAuthData
 from .riot_proxy import RiotProxy
 from .wine_manager import WineManager
-from .machine_pool import select_machine_for_session
-from .gateway_envelope import build_gateway_envelope, post_gateway_auth
 
 log = logging.getLogger("session_manager")
+
+
+class SessionState(Enum):
+    """Session lifecycle states"""
+    INITIALIZING = "initializing"
+    AUTH_PENDING = "auth_pending"
+    AUTHENTICATED = "authenticated"
+    IN_QUEUE = "in_queue"
+    IN_MATCH = "in_match"
+    HEARTBEATING = "heartbeating"
+    ZOMBIE = "zombie"  # Lost connection but not destroyed
+    DESTROYED = "destroyed"
+
+
+@dataclass
+class TokenLifecycle:
+    """Track token expiration and refresh"""
+    f1_token: str = ""
+    f1_issued_at: float = 0.0
+    f1_expires_at: float = 0.0
+    f1_ttl_seconds: int = 300  # 5 minutes
+
+    f15_token: str = ""
+    f15_issued_at: float = 0.0
+
+    gateway_envelope: Optional[bytes] = None
+    envelope_issued_at: float = 0.0
+    envelope_ttl_seconds: int = 240  # 4 minutes
+
+    def is_f1_expired(self) -> bool:
+        """Check if F1 token is stale"""
+        return time.time() > self.f1_expires_at if self.f1_expires_at > 0 else False
+
+    def is_envelope_expired(self) -> bool:
+        """Check if Gateway envelope is stale"""
+        return time.time() > (self.envelope_issued_at + self.envelope_ttl_seconds) if self.envelope_issued_at > 0 else False
+
+    def time_to_refresh_f1(self) -> float:
+        """Seconds until F1 needs refresh"""
+        return max(0.0, self.f1_expires_at - time.time()) if self.f1_expires_at > 0 else 0.0
+
+    def time_to_refresh_envelope(self) -> float:
+        """Seconds until envelope needs refresh"""
+        return max(0.0, (self.envelope_issued_at + self.envelope_ttl_seconds) - time.time()) if self.envelope_issued_at > 0 else 0.0
+
+
+@dataclass
+class HeartbeatMetrics:
+    """Track heartbeat health and detect gaps that trigger VAL 5"""
+    last_hb_sent: float = 0.0
+    last_hb_received: float = 0.0
+    last_hb_timestamp: float = 0.0
+    hb_count: int = 0
+    hb_intervals: List[float] = field(default_factory=list)
+    hb_gap_warning_threshold: float = 12.0  # 12 seconds
+    hb_gap_critical_threshold: float = 15.0  # 15 seconds
+
+    def record_heartbeat(self) -> Any:
+        """Record heartbeat timing"""
+        now = time.time()
+
+        status: Any = True
+        if self.last_hb_sent > 0:
+            interval = now - self.last_hb_sent
+            self.hb_intervals.append(interval)
+
+            if len(self.hb_intervals) > 60:
+                self.hb_intervals.pop(0)
+
+            if interval > self.hb_gap_critical_threshold:
+                status = False  # CRITICAL - will trigger VAL 5
+            elif interval > self.hb_gap_warning_threshold:
+                status = "warning"  # WARNING - at risk
+
+        self.last_hb_sent = now
+        self.hb_count += 1
+        return status
+
+    def avg_interval(self) -> float:
+        """Average heartbeat interval"""
+        if not self.hb_intervals:
+            return 0.0
+        return sum(self.hb_intervals) / len(self.hb_intervals)
+
+    def get_health_status(self) -> Dict[str, Any]:
+        """Current heartbeat health metrics"""
+        return {
+            "count": self.hb_count,
+            "avg_interval": self.avg_interval(),
+            "last_sent": self.last_hb_sent,
+            "intervals_tracked": len(self.hb_intervals),
+        }
 
 
 @dataclass
@@ -59,6 +155,10 @@ class Session:
     machine_profile: dict = field(default_factory=dict)
     # Dynamic build info
     build_info: dict = field(default_factory=dict)
+    # Lifecycle & Heartbeat Metrics
+    state: SessionState = SessionState.INITIALIZING
+    token_lifecycle: TokenLifecycle = field(default_factory=TokenLifecycle)
+    hb_metrics: HeartbeatMetrics = field(default_factory=HeartbeatMetrics)
 
 
 class SessionManager:
@@ -80,6 +180,12 @@ class SessionManager:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._running = False
         self._status_tick = 0
+
+    def start(self) -> None:
+        if not self._running:
+            self._running = True
+            self._thread.start()
+            log.info("SessionManager thread started")
 
     def _log_event(
         self,
@@ -118,18 +224,14 @@ class SessionManager:
         # Purge stale/previous active sessions for the same PUUID to avoid duplicate sessions (VAL 5 trigger)
         if puuid:
             with self._lock:
-                to_destroy = [s_id for s_id, s in self._sessions.items() if s.client_puuid == puuid]
-            for old_sid in to_destroy:
-                log.info("purging old duplicate session=%s for puuid=%s", old_sid[:8], puuid[:8])
-                self.destroy_session(old_sid)
+                stale_ids = [sid for sid, s in self._sessions.items() if s.client_puuid == puuid]
+            for sid in stale_ids:
+                log.info("purging old duplicate session=%s for puuid=%s", sid[:8], puuid[:8])
+                self.destroy_session(sid)
 
-        session_id = str(uuid.uuid4())
-        
-        # CRITICAL FIX: Select machine profile from pool of 500 (paid emulator logic)
-        machine_idx, machine_profile = select_machine_for_session(session_seed=int(hashlib.md5(session_id.encode()).hexdigest()[:8], 16))
-        log.info(f"[GW] generating 500 machine entries in memory...")
-        log.info(f"[GW] selected machine idx={machine_idx} (500 entries)")
-        
+        session_id = uuid.uuid4().hex[:8]
+        machine_idx, machine_profile = select_machine_for_session(puuid, session_id)
+
         entitlements_token = getattr(auth, 'entitlements_token', '') or auth.jwt
         id_token = getattr(auth, 'id_token', '') or ""
 
@@ -141,6 +243,11 @@ class SessionManager:
             "patch": getattr(auth, 'build_patch', 0) or 5,
             "flags": getattr(auth, 'build_flags', 0) or 0,
         }
+
+        token_lifecycle = TokenLifecycle(
+            envelope_issued_at=time.time(),
+            envelope_ttl_seconds=240,
+        )
 
         session = Session(
             session_id=session_id,
@@ -170,70 +277,71 @@ class SessionManager:
             machine_idx=machine_idx,
             machine_profile=machine_profile,
             build_info=build_info,
+            state=SessionState.INITIALIZING,
+            token_lifecycle=token_lifecycle,
         )
         with self._lock:
             self._sessions[session_id] = session
 
         meta = {
-            "client_ip": client_ip,
-            "client_ts_ms": auth.client_ts_ms,
+            "account": riot_account,
             "region": region,
-            "puuid": puuid,
-            "valorant_pid": auth.valorant_pid,
-            "jwt_len": len(auth.jwt),
-            "riot_account": riot_account,
-            "hostname": session.hostname,
-            "gateway_machine_id": auth.gateway_machine_id.decode("utf-8", errors="replace"),
-            "hwid_fingerprint_hex": self._hwid_hex(auth.hwid_fingerprint),
-            "machine_pool_idx": machine_idx,
+            "hwid": self._hwid_hex(auth.hwid_fingerprint)[:16],
+            "ip": client_ip,
+            "pid": auth.valorant_pid,
+            "machine_idx": machine_idx,
         }
-        self._log_event(session_id, "session_auth", "created", None, meta)
+        self._log_event(session_id, "session", "created", None, meta)
         log.info(
             "session %s CREATED ip=%s region=%s account=%s pid=%d puuid=%s hwid=%s machine_idx=%d",
             session_id[:8],
             client_ip,
             region,
-            riot_account[:24] if riot_account else "",
+            riot_account[:8],
             auth.valorant_pid,
             puuid[:8] if puuid else "",
             self._hwid_hex(auth.hwid_fingerprint)[:16],
-            machine_idx
+            machine_idx,
         )
-        if auth.cpu_brand or auth.gpu_brand:
-            log.info(
-                "session %s HWINFO cpu='%s %s' (%d threads) gpu='%s %s'",
-                session_id[:8],
-                session.cpu_brand,
-                session.cpu_model,
-                session.cpu_logical_count,
-                session.gpu_brand,
-                session.gpu_model,
-            )
+
+        log.info(
+            "session %s HWINFO cpu='%s %s' (%d threads) gpu='%s %s'",
+            session_id[:8],
+            session.cpu_brand,
+            session.cpu_model,
+            session.cpu_logical_count,
+            session.gpu_brand,
+            session.gpu_model,
+        )
+
         if not self._provision_container(session_id, machine_profile):
             self.destroy_session(session_id)
             return None
+
+        session.state = SessionState.AUTHENTICATED
         return session_id
-
-    def start(self) -> None:
-        self._running = True
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._running = False
 
     def is_active(self, session_id: str) -> bool:
         with self._lock:
-            return session_id in self._sessions
-
-    def get(self, session_id: str) -> Optional[Session]:
-        with self._lock:
-            return self._sessions.get(session_id)
+            s = self._sessions.get(session_id)
+            return s is not None and s.state != SessionState.DESTROYED
 
     def touch(self, session_id: str) -> None:
         with self._lock:
             s = self._sessions.get(session_id)
             if s:
                 s.last_activity = time.time()
+
+    def note_ioctl(self, session_id: str, code: int, in_len: int, out_len: int) -> None:
+        with self._lock:
+            s = self._sessions.get(session_id)
+            if s:
+                s.ioctl_count += 1
+                s.last_activity = time.time()
+                s.hb_metrics.record_heartbeat()
+                if code == 0x222000:
+                    s.state = SessionState.HEARTBEATING
+        log.info("session %s IOCTL 0x%X in=%d out=%d", session_id[:8], code, in_len, out_len)
 
     def note_ping(self, session_id: str) -> None:
         with self._lock:
@@ -242,124 +350,82 @@ class SessionManager:
                 s.ping_count += 1
                 s.last_activity = time.time()
 
-    def note_ioctl(self, session_id: str, ioctl_code: int, in_len: int, out_len: int) -> None:
+    def note_pipe_auth_repeat(self, session_id: str, pid: int) -> bool:
         with self._lock:
             s = self._sessions.get(session_id)
-            if s:
-                s.ioctl_count += 1
-                s.last_activity = time.time()
-        log.info(
-            "session %s IOCTL 0x%X in=%d out=%d",
-            session_id[:8],
-            ioctl_code,
-            in_len,
-            out_len,
-        )
+            if not s:
+                return False
+            s.pipe_auth_count += 1
+            s.last_activity = time.time()
+            if pid and not s.valorant_pid:
+                s.valorant_pid = pid
+        self._log_event(session_id, "pipe_auth", "ok", f"pid={pid}")
+        return True
 
-    def update_jwt(self, session_id: str, jwt: str, puuid: str) -> bool:
-        """JWT refresh após sessão já autenticada (container ativo)."""
+    def update_jwt(self, session_id: str, jwt: str, puuid: str = "") -> bool:
         with self._lock:
             s = self._sessions.get(session_id)
             if not s:
                 return False
             s.riot_token = jwt
-            s.client_puuid = puuid
             s.client_jwt_at = time.time()
             s.jwt_push_count += 1
             s.last_activity = time.time()
-            has_container = bool(s.container_id)
-            container_id = s.container_id
-
-        reason = f"puuid={puuid[:8] if puuid else ''} len={len(jwt)}"
-        if has_container:
-            self.riot.on_client_jwt(session_id, container_id, jwt, puuid)
-            self._log_event(session_id, "jwt_update", "ok_container", reason)
-            log.info(
-                "session %s jwt updated (container live) puuid=%s len=%d",
-                session_id[:8],
-                puuid[:8] if puuid else "",
-                len(jwt),
-            )
-        else:
-            self._log_event(session_id, "jwt_update", "cached_active", reason)
-            log.info(
-                "session %s jwt cached (await container) puuid=%s len=%d",
-                session_id[:8],
-                puuid[:8] if puuid else "",
-                len(jwt),
-            )
-        return True
-
-    def note_pipe_auth_repeat(self, session_id: str, valorant_pid: int) -> bool:
-        with self._lock:
-            s = self._sessions.get(session_id)
-            if not s:
-                return False
-            s.valorant_pid = valorant_pid
-            s.pipe_auth_at = time.time()
-            s.pipe_auth_count += 1
-            s.last_activity = time.time()
-            auth_n = s.pipe_auth_count
+            s.token_lifecycle.envelope_issued_at = time.time()
             cid = s.container_id
 
-        log.info(
-            "session %s pipe auth repeat (container %s pid=%d)",
-            session_id[:8],
-            cid[:8],
-            valorant_pid,
-        )
+        if cid and jwt:
+            self.wine.push_jwt_to_container(cid, jwt, puuid or s.client_puuid)
+            self.riot.on_client_jwt(session_id, cid, jwt, puuid or s.client_puuid)
+            self._log_event(session_id, "jwt", "updated", f"len={len(jwt)}")
+            log.info("session %s updated JWT len=%d (push_count=%d)", session_id[:8], len(jwt), s.jwt_push_count)
+
+        # Update crypto session
+        from .vgc_crypto import _crypto
+        _crypto.update_jwt(session_id, jwt, puuid or s.client_puuid)
+
         return True
 
     def _provision_container(self, session_id: str, machine_profile: dict = None) -> bool:
-        """Provision Wine container + gateway auth using Session cached attributes."""
         with self._lock:
             snap = self._sessions.get(session_id)
         if not snap:
             return False
 
-        # FAST PROVISIONING: Start immediately to avoid VAL 5 timeout
         start_time = time.time()
-        
-        container_id = self.wine.create_container()
-        
-        # Use machine profile from Session if omitted
-        m_profile = machine_profile if machine_profile else snap.machine_profile
 
         profile = {
             "session_id": session_id,
             "gateway_machine_id": snap.gateway_machine_id,
-            "hwid_fingerprint_hex": self._hwid_hex(snap.hwid_fingerprint),
+            "hwid_fingerprint": snap.hwid_fingerprint,
+            "riot_token": snap.riot_token,
             "client_puuid": snap.client_puuid,
-            "valorant_pid": snap.valorant_pid,
             "region": snap.region,
             "riot_account": snap.riot_account,
             "hostname": snap.hostname,
             "client_ip": snap.client_ip,
-            "client_ts_ms": snap.client_ts_ms,
-            "jwt": snap.riot_token,
-            # Merge machine profile fields (from pool of 500)
-            "bios_info": m_profile.get("bios_info") if m_profile else None,
-            "motherboard": m_profile.get("motherboard") if m_profile else None,
-            "volume_serial": m_profile.get("volume_serial") if m_profile else None,
             "cpu_brand": snap.cpu_brand,
             "cpu_model": snap.cpu_model,
             "gpu_brand": snap.gpu_brand,
             "gpu_model": snap.gpu_model,
             "cpu_logical_count": snap.cpu_logical_count,
         }
-        self.wine.bind_session_profile(container_id, profile)
+        if machine_profile:
+            profile.update(machine_profile)
 
-        if not self.wine.wait_ready(container_id):
-            self._log_event(session_id, "container", "not_ready", None)
-            log.error("session %s container not ready", session_id[:8])
-            self.wine.destroy_container(container_id)
-            return False
+        container_id = self.wine.create_container_with_profile(profile)
 
-        # CRITICAL: Build gateway envelope with REAL tokens from vClient (cached in Session)
+        from .vgc_crypto import _crypto
+        _crypto.mount(
+            session_id=session_id,
+            puuid=snap.client_puuid,
+            jwt=snap.riot_token,
+            hwid_blob=snap.hwid_fingerprint
+        )
+
         entitlements_token = snap.entitlements_token or snap.riot_token
         id_token = snap.id_token or ""
 
-        # Build dynamic protobuf gateway envelope
         gateway_envelope = build_gateway_envelope(
             session_id=session_id,
             hwid_hex=self._hwid_hex(snap.hwid_fingerprint),
@@ -378,74 +444,48 @@ class SessionManager:
             len(gateway_envelope)
         )
 
-        # POST envelope to real Riot gateway
         status_code, response_body = post_gateway_auth(
-            gateway_envelope,
             region=snap.region,
-            session_id=session_id,
+            gateway_envelope=gateway_envelope,
             entitlements_token=entitlements_token,
             id_token=id_token,
-            puuid=snap.client_puuid
+            puuid=snap.client_puuid,
         )
 
-        # VALIDATION: Gateway response MUST be non-empty + status 200
-        if status_code != 200 or not response_body:
+        if status_code != 200 or not response_body or len(response_body) == 0:
             log.error(
-                "session %s gateway auth FAILED status=%d response_len=%d - destroying container",
+                "session %s GATEWAY AUTH FAILED HTTP %d (body_len=%d) — destroying container",
                 session_id[:8],
                 status_code,
                 len(response_body) if response_body else 0
             )
-            self._log_event(
-                session_id,
-                "gateway",
-                "auth_failed",
-                f"status={status_code} len={len(response_body) if response_body else 0}"
-            )
             self.wine.destroy_container(container_id)
             return False
 
-        if len(response_body) < 32:
+        if len(response_body) < 100:
             log.warning(
-                "session %s gateway response suspiciously small (%d bytes) — may be fallback",
+                "session %s Gateway response small (%d bytes) — monitor for VAL 5",
                 session_id[:8],
                 len(response_body)
             )
 
-        # Cache gateway response for heartbeats
         with self._lock:
             s = self._sessions.get(session_id)
             if s:
                 s.gateway_response = response_body
-                s.gateway_auth_ok = True
                 s.gateway_auth_time = time.time()
-        
-        log.info("[GW] gateway response cached (%d bytes) for heartbeat relay", len(response_body))
-        
-        token = self.riot.authenticate(container_id, profile)
-        
-        # Get heartbeat config from global config (matches config.yaml defaults: 10000ms / 500ms)
-        from .config import load_config
-        from pathlib import Path
-        cfg = load_config(Path(__file__).resolve().parent.parent / "config.yaml")
-        hb_cfg = cfg.get("heartbeat", {})
-        
-        interval_ms = int(hb_cfg.get("interval_ms", 10000))
-        jitter_max_ms = int(hb_cfg.get("jitter_max_ms", 500))
+                s.gateway_auth_ok = True
+                s.token_lifecycle.gateway_envelope = response_body
 
-        log.info(
-            "session %s heartbeat config: interval=%dms jitter=%dms",
-            session_id[:8],
-            interval_ms,
-            jitter_max_ms
-        )
+        _crypto.set_gateway_token(session_id, response_body)
 
+        token = self.wine.wait_for_token(container_id, timeout_sec=2.0)
         scheduler = HeartbeatScheduler(
-            session_id, 
-            container_id, 
-            self.riot,
-            interval_ms=interval_ms,
-            jitter_max_ms=jitter_max_ms,
+            session_id=session_id,
+            container_id=container_id,
+            wine=self.wine,
+            riot=self.riot,
+            event_log=self._event_log,
         )
 
         with self._lock:
@@ -472,7 +512,7 @@ class SessionManager:
             log.info("session %s first heartbeat sent successfully", session_id[:8])
         except Exception as e:
             log.error("session %s first heartbeat FAILED: %s — continuing anyway", session_id[:8], e)
-        
+
         provision_time = time.time() - start_time
         self._log_event(
             session_id,
@@ -503,13 +543,17 @@ class SessionManager:
                 session_id[:8],
                 provision_time
             )
-        
+
         return True
 
     def destroy_session(self, session_id: str) -> None:
         with self._lock:
             s = self._sessions.pop(session_id, None)
             self._schedulers.pop(session_id, None)
+
+        if s:
+            s.state = SessionState.DESTROYED
+
         if s and s.container_id:
             self.wine.destroy_container(s.container_id)
             self._log_event(session_id, "session", "destroyed", f"cid={s.container_id[:8]}")
@@ -540,28 +584,25 @@ class SessionManager:
         with self._lock:
             sessions = len(self._sessions)
             containers = sum(1 for s in self._sessions.values() if s.container_id)
-            
-            # VAL 5 RISK DETECTION: Check for sessions without activity
+
             now = time.time()
             at_risk = []
             for sid, s in self._sessions.items():
                 time_since_auth = now - s.client_jwt_at if s.client_jwt_at else 999
                 time_since_activity = now - s.last_activity
-                
-                # Risk: No JWT refresh in 4 minutes OR no activity in 3 minutes
+
                 if time_since_auth > 240 or time_since_activity > 180:
                     at_risk.append((sid, time_since_auth, time_since_activity))
-        
+
         if sessions == 0:
             return
-            
+
         log.info(
             "status: active_sessions=%d containers=%d",
             sessions,
             containers,
         )
-        
-        # Warn about VAL 5 risk
+
         for sid, jwt_age, activity_age in at_risk:
             log.warning(
                 "session %s VAL 5 RISK: jwt_age=%.1fs activity_age=%.1fs",
